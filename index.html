@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>人力资源分析平台</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="echarts.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo">HR</div>
+        <div class="brand-text">
+          <div class="brand-title">人力资源分析平台</div>
+          <div class="brand-sub">HR Analytics</div>
+        </div>
+      </div>
+      <nav class="nav">
+        <button class="nav-item active" data-view="overview">
+          <span class="nav-icon">📊</span><span>数据总览</span>
+        </button>
+        <button class="nav-item" data-view="personnel">
+          <span class="nav-icon">👥</span><span>人员看板</span>
+        </button>
+        <button class="nav-item" data-view="salary">
+          <span class="nav-icon">💰</span><span>薪资看板</span>
+        </button>
+        <button class="nav-item" data-view="tasks">
+          <span class="nav-icon">✅</span><span>任务进度看板</span>
+        </button>
+        <button class="nav-item" data-view="employees">
+          <span class="nav-icon">🗂️</span><span>员工明细</span>
+        </button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="foot-stat">
+          <span id="footTotal">—</span>
+          <small>在职员工</small>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1 id="viewTitle">数据总览</h1>
+          <p id="viewSub">全公司人力资源核心指标概览</p>
+        </div>
+        <div class="topbar-right">
+          <div class="period">
+            <span>统计周期</span>
+            <select id="periodSelect">
+              <option value="2025Q1">2025 Q1</option>
+              <option value="2025Q2" selected>2025 Q2</option>
+              <option value="2025Q3">2025 Q3</option>
+            </select>
+          </div>
+          <div class="topbar-user">管理员</div>
+        </div>
+      </header>
+
+      <!-- ============ OVERVIEW ============ -->
+      <section class="view active" id="view-overview">
+        <div class="kpi-row" id="overviewKpis"></div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h3>各部门人数分布</h3></div>
+            <div class="chart" id="ovDeptBar"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>人员结构（性别 / 层级）</h3></div>
+            <div class="chart" id="ovStructure"></div>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h3>近 8 季度人数与离职率趋势</h3></div>
+            <div class="chart" id="ovTrend"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>任务完成情况概览</h3></div>
+            <div class="chart" id="ovTasks"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ PERSONNEL ============ -->
+      <section class="view" id="view-personnel">
+        <div class="kpi-row" id="personnelKpis"></div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h3>员工人数年度变化</h3></div>
+            <div class="chart" id="peHeadcount"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>性别构成</h3></div>
+            <div class="chart" id="peGender"></div>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h3>年龄分布</h3></div>
+            <div class="chart" id="peAge"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>学历构成</h3></div>
+            <div class="chart" id="peEdu"></div>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h3>各部门在职 / 离职人数</h3></div>
+            <div class="chart" id="peDeptStack"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>司龄分布</h3></div>
+            <div class="chart" id="peTenure"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>各部门人数明细</h3></div>
+          <div class="table-wrap">
+            <table class="data-table" id="peTable"></table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ SALARY ============ -->
+      <section class="view" id="view-salary">
+        <div class="kpi-row" id="salaryKpis"></div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h3>月薪分布（人数占比）</h3></div>
+            <div class="chart" id="saHist"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>各部门平均薪资</h3></div>
+            <div class="chart" id="saDeptBar"></div>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h3>薪资等级 vs 人数</h3></div>
+            <div class="chart" id="saLevel"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>薪资预算 vs 实际支出（近 6 月）</h3></div>
+            <div class="chart" id="saBudget"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>各部门薪资构成（基本工资 / 绩效 / 补贴）</h3></div>
+          <div class="table-wrap">
+            <table class="data-table" id="saTable"></table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ TASKS ============ -->
+      <section class="view" id="view-tasks">
+        <div class="kpi-row" id="tasksKpis"></div>
+
+        <!-- 智能快速录入条 -->
+        <div class="card smart-card" id="smartCard">
+          <div class="smart-bar">
+            <span class="smart-ico">⚡</span>
+            <input id="smartInput" class="smart-input" placeholder="用一句话快速录入，如：今天给王总打电话确认合同事宜，金额 50 万。回车识别 →" autocomplete="off" />
+            <button class="btn btn-llm" id="smartAnalyze">识别</button>
+          </div>
+          <div class="smart-hint">试试：
+            <button class="chip-btn" data-demo="今天给王总打电话确认合同事宜">打电话确认合同</button>
+            <button class="chip-btn" data-demo="明天上午9点拜访客户李经理">拜访客户</button>
+            <button class="chip-btn" data-demo="周五前提交Q3招聘方案给人事总监">提交方案</button>
+          </div>
+          <div id="smartPanel" class="smart-panel"></div>
+        </div>
+
+        <!-- AI 智能分析 -->
+        <div class="card ai-card">
+          <div class="card-head">
+            <h3>🤖 AI 进度分析 <span id="aiSource" class="ai-source"></span></h3>
+            <div class="ai-actions">
+              <button class="btn btn-llm" id="btnAiDeep">✨ AI 深度分析</button>
+              <button class="btn" id="btnAiSettings">⚙️ 设置</button>
+              <button class="btn btn-ai" id="btnAiRefresh">重新分析</button>
+            </div>
+          </div>
+          <div id="aiInsights" class="ai-insights"></div>
+          <div class="ai-scope">
+            🔒 「AI 深度分析」只会把你录入的<b>任务清单</b>（任务名/负责人/团队/优先级/状态/进度/起止日期/工时/备注）发送给所选模型，
+            <b>不包含</b>员工薪资、年龄、学历等人员敏感信息。
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h3>任务状态分布</h3></div>
+            <div class="chart" id="tkStatus"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>各团队任务完成率</h3></div>
+            <div class="chart" id="tkTeam"></div>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h3>优先级分布</h3></div>
+            <div class="chart" id="tkPriority"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>工作量投入（工时）</h3></div>
+            <div class="chart" id="tkHours"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>重点工作任务甘特图（进度追踪）</h3></div>
+          <div class="chart" id="tkGantt"></div>
+        </div>
+
+        <!-- 日常工作录入 -->
+        <div class="card" id="tkListCard">
+          <div class="emp-toolbar">
+            <h3>日常工作明细（录入 / 跟踪）</h3>
+            <div class="emp-actions">
+              <input id="tkSearch" class="emp-search" placeholder="搜索任务 / 负责人" />
+              <select id="tkTeamFilter"><option value="">全部团队</option></select>
+              <select id="tkStatusFilter"><option value="">全部状态</option><option>未开始</option><option>进行中</option><option>已完成</option><option>阻塞</option></select>
+              <select id="tkPriorityFilter"><option value="">全部优先级</option><option>高</option><option>中</option><option>低</option></select>
+              <button class="btn btn-add" id="btnTaskAdd">＋ 新增任务</button>
+              <button class="btn btn-pdf" id="btnTaskPdf">🖨 A4 打印版</button>
+              <button class="btn btn-excel" id="btnTaskExcel">⬇ 导出 Excel</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="tkTable"></table>
+          </div>
+          <div class="pager" id="tkPager"></div>
+        </div>
+      </section>
+
+      <!-- ============ EMPLOYEES ============ -->
+      <section class="view" id="view-employees">
+        <div class="kpi-row" id="empKpis"></div>
+        <div class="card">
+          <div class="emp-toolbar">
+            <h3>员工明细（搜索 / 筛选 / 导出）</h3>
+            <div class="emp-actions">
+              <input id="empSearch" class="emp-search" placeholder="搜索姓名 / 工号" />
+              <select id="empDept"><option value="">全部部门</option></select>
+              <select id="empLevel"><option value="">全部职级</option></select>
+              <select id="empGender"><option value="">全部性别</option><option value="男">男</option><option value="女">女</option></select>
+              <select id="empStatus"><option value="">全部状态</option><option value="在职">在职</option><option value="试用">试用</option><option value="离职">离职</option></select>
+              <button class="btn btn-add" id="btnAdd">＋ 新增员工</button>
+              <button class="btn btn-import" id="btnImport">⬆ 导入</button>
+              <input type="file" id="empImport" accept=".xlsx,.xls,.csv" style="display:none" />
+              <button class="btn btn-excel" id="btnExcel">⬇ 导出 Excel</button>
+              <button class="btn btn-pdf" id="btnPdf">⬇ 导出 PDF</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="empTable"></table>
+          </div>
+          <div class="pager" id="empPager"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 员工录入 / 编辑 弹窗 -->
+  <div class="modal" id="empModal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h3 id="empModalTitle">新增员工</h3>
+        <button class="modal-close" id="empModalClose" aria-label="关闭">×</button>
+      </div>
+      <form id="empForm" class="emp-form">
+        <input type="hidden" id="f_id" />
+        <div class="form-grid">
+          <label>姓名<input id="f_name" required placeholder="如：张三" /></label>
+          <label>工号<input id="f_empno" placeholder="留空自动生成" /></label>
+          <label>部门<select id="f_dept"></select></label>
+          <label>职级<select id="f_level"><option>P4</option><option>P5</option><option>P6</option><option>P7</option><option>P8</option><option>M1</option><option>M2</option></select></label>
+          <label>性别<select id="f_gender"><option>男</option><option>女</option></select></label>
+          <label>年龄<input id="f_age" type="number" min="16" max="65" /></label>
+          <label>学历<select id="f_edu"><option>大专</option><option>本科</option><option>硕士</option><option>博士</option></select></label>
+          <label>司龄(年)<input id="f_tenure" type="number" min="0" step="0.5" /></label>
+          <label>状态<select id="f_status"><option>在职</option><option>试用</option><option>离职</option></select></label>
+          <label>月薪(元)<input id="f_salary" type="number" min="0" step="100" /></label>
+          <label>绩效<select id="f_perf"><option>S</option><option>A</option><option>B</option><option>C</option></select></label>
+          <label>入职日期<input id="f_hireDate" type="date" /></label>
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn" id="empCancel">取消</button>
+          <button type="submit" class="btn btn-excel">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 任务录入 / 编辑 弹窗 -->
+  <div class="modal" id="taskModal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h3 id="taskModalTitle">新增任务</h3>
+        <button class="modal-close" id="taskModalClose" aria-label="关闭">×</button>
+      </div>
+      <form id="taskForm" class="emp-form">
+        <input type="hidden" id="t_id" />
+        <div class="form-grid">
+          <label class="span-2">任务名称<input id="t_name" required placeholder="如：Q2 招聘计划" /></label>
+          <label>负责人<input id="t_owner" required placeholder="如：张伟" /></label>
+          <label>所属团队<select id="t_team"></select></label>
+          <label>优先级<select id="t_priority"><option>高</option><option selected>中</option><option>低</option></select></label>
+          <label>状态<select id="t_status"><option>未开始</option><option selected>进行中</option><option>已完成</option><option>阻塞</option></select></label>
+          <label>开始日期<input id="t_start" type="date" /></label>
+          <label>截止日期<input id="t_due" type="date" /></label>
+          <label>计划工时<input id="t_hours" type="number" min="0" step="1" placeholder="小时" /></label>
+        </div>
+        <div class="progress-row">
+          <label for="t_progress">完成进度：<b id="t_progressVal">0%</b></label>
+          <input id="t_progress" type="range" min="0" max="100" step="5" value="0" />
+        </div>
+        <div class="form-grid">
+          <label class="span-2">备注<textarea id="t_remark" rows="2" placeholder="风险、依赖、阻塞原因等"></textarea></label>
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn" id="taskCancel">取消</button>
+          <button type="submit" class="btn btn-excel">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- AI 大模型设置 弹窗 -->
+  <div class="modal" id="aiModal">
+    <div class="modal-box modal-narrow">
+      <div class="modal-head">
+        <h3>⚙️ AI 大模型设置</h3>
+        <button class="modal-close" id="aiModalClose" aria-label="关闭">×</button>
+      </div>
+      <div class="ai-settings">
+        <div class="form-grid">
+          <label>服务商
+            <select id="aiProvider"></select>
+          </label>
+          <label>模型名称
+            <input id="aiModel" placeholder="如 deepseek-chat" />
+          </label>
+          <label class="span-2">接口地址（OpenAI 兼容）
+            <input id="aiBaseUrl" placeholder="https://api.deepseek.com/v1" />
+          </label>
+          <label class="span-2">API Key
+            <input id="aiKey" type="password" placeholder="sk-...（仅保存在服务器，不会下发给浏览器）" autocomplete="off" />
+          </label>
+        </div>
+        <div class="ai-hint" id="aiKeyHint"></div>
+        <div class="form-actions">
+          <span id="aiTestResult" class="ai-test-result"></span>
+          <button type="button" class="btn" id="aiTestBtn">测试连接</button>
+          <button type="button" class="btn" id="aiCancel">取消</button>
+          <button type="button" class="btn btn-excel" id="aiSaveBtn">保存</button>
+        </div>
+        <div class="ai-note">
+          支持任何 OpenAI 兼容协议的服务商（DeepSeek、OpenAI、通义千问、智谱 GLM、Kimi、腾讯混元等）。
+          API Key 只保存在服务端 <code>data/ai-config.json</code>，前端接口只返回脱敏后的掩码。
+          未配置时，「AI 深度分析」会自动回退到内置规则引擎。
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="data.js"></script>
+  <script src="config.js"></script>
+  <script src="xlsx.full.min.js"></script>
+  <script src="jspdf.umd.min.js"></script>
+  <script src="html2canvas.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

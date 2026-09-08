@@ -1,0 +1,19 @@
+# Render Blueprint（可选，Render 会读取 render.yaml）
+# 若用 Render：直接把本仓库根目录连接 Render，选 Docker 构建即可。
+services:
+  - type: web
+    name: hr-analytics-platform
+    runtime: docker
+    repo: https://github.com/YOUR_USER/hr-analytics-platform  # 改成你的仓库地址
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: DATA_DIR
+        value: /app/data
+    healthCheckPath: /api/health
+    disk:
+      name: data
+      mountPath: /app/data
+      sizeGB: 1

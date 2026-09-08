@@ -1,0 +1,12 @@
+{
+  "name": "hr-analytics-platform",
+  "version": "1.0.0",
+  "description": "人力资源分析平台 - 含录入/导入与后端持久化的可视化平台",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.22.2"
+  }
+}

@@ -1,0 +1,22 @@
+[
+  { "name": "薪酬体系优化方案", "owner": "张伟", "team": "人力资源部", "priority": "高", "status": "进行中", "progress": 65, "startOffset": -40, "dueOffset": 25, "hours": 120, "remark": "需财务配合测算" },
+  { "name": "Q1 招聘计划执行", "owner": "李娜", "team": "人力资源部", "priority": "高", "status": "进行中", "progress": 80, "startOffset": -30, "dueOffset": 40, "hours": 200, "remark": "研发岗缺口 8 人" },
+  { "name": "员工满意度调研", "owner": "王芳", "team": "人力资源部", "priority": "中", "status": "已完成", "progress": 100, "startOffset": -60, "dueOffset": -20, "hours": 60, "remark": "回收率 87%" },
+  { "name": "绩效管理系统上线", "owner": "陈晨", "team": "研发部", "priority": "高", "status": "进行中", "progress": 45, "startOffset": -20, "dueOffset": 35, "hours": 320, "remark": "联调阶段" },
+  { "name": "考勤模块重构", "owner": "刘洋", "team": "研发部", "priority": "中", "status": "进行中", "progress": 30, "startOffset": -10, "dueOffset": 50, "hours": 180, "remark": "" },
+  { "name": "数据看板性能优化", "owner": "赵磊", "team": "研发部", "priority": "低", "status": "未开始", "progress": 0, "startOffset": 15, "dueOffset": 70, "hours": 90, "remark": "等排期" },
+  { "name": "生产环境安全加固", "owner": "孙浩", "team": "研发部", "priority": "高", "status": "已完成", "progress": 100, "startOffset": -70, "dueOffset": -30, "hours": 150, "remark": "已通过等保测评" },
+  { "name": "移动端 APP 改版", "owner": "周敏", "team": "产品部", "priority": "高", "status": "进行中", "progress": 55, "startOffset": -25, "dueOffset": 30, "hours": 260, "remark": "UI 评审中" },
+  { "name": "用户增长方案设计", "owner": "吴静", "team": "市场部", "priority": "中", "status": "进行中", "progress": 40, "startOffset": -5, "dueOffset": 45, "hours": 140, "remark": "" },
+  { "name": "春季品牌推广活动", "owner": "郑凯", "team": "市场部", "priority": "高", "status": "进行中", "progress": 25, "startOffset": -3, "dueOffset": 25, "hours": 110, "remark": "预算待批" },
+  { "name": "Q1 销售目标拆解", "owner": "冯磊", "team": "销售部", "priority": "高", "status": "已完成", "progress": 100, "startOffset": -55, "dueOffset": -40, "hours": 40, "remark": "" },
+  { "name": "大客户回访计划", "owner": "许静", "team": "销售部", "priority": "中", "status": "进行中", "progress": 70, "startOffset": -35, "dueOffset": 20, "hours": 90, "remark": "已回访 23/30" },
+  { "name": "新人销售培训", "owner": "何强", "team": "销售部", "priority": "低", "status": "进行中", "progress": 50, "startOffset": -8, "dueOffset": 38, "hours": 60, "remark": "" },
+  { "name": "年度预算编制", "owner": "马丽", "team": "财务部", "priority": "高", "status": "阻塞", "progress": 35, "startOffset": -25, "dueOffset": -5, "hours": 130, "remark": "等待各部门数据" },
+  { "name": "成本核算流程优化", "owner": "黄勇", "team": "财务部", "priority": "中", "status": "未开始", "progress": 0, "startOffset": 10, "dueOffset": 60, "hours": 100, "remark": "" },
+  { "name": "用户运营 SOP 梳理", "owner": "林娜", "team": "运营部", "priority": "中", "status": "进行中", "progress": 60, "startOffset": -20, "dueOffset": 25, "hours": 80, "remark": "" },
+  { "name": "社群活跃度提升", "owner": "徐涛", "team": "运营部", "priority": "低", "status": "进行中", "progress": 45, "startOffset": -12, "dueOffset": 55, "hours": 70, "remark": "" },
+  { "name": "客户满意度专项改进", "owner": "高鹏", "team": "运营部", "priority": "高", "status": "进行中", "progress": 15, "startOffset": -18, "dueOffset": 10, "hours": 95, "remark": "进度严重滞后" },
+  { "name": "员工档案电子化", "owner": "张伟", "team": "人力资源部", "priority": "中", "status": "进行中", "progress": 85, "startOffset": -45, "dueOffset": 3, "hours": 110, "remark": "临近截止" },
+  { "name": "客服系统选型", "owner": "周敏", "team": "产品部", "priority": "中", "status": "未开始", "progress": 0, "startOffset": 8, "dueOffset": 65, "hours": 85, "remark": "" }
+]
