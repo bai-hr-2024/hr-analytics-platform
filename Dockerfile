@@ -15,8 +15,6 @@ COPY . .
 # 3) 数据目录（挂载点，便于持久化）
 ENV DATA_DIR=/app/data
 RUN mkdir -p /app/data
-VOLUME ["/app/data"]
-
 # 端口
 ENV PORT=3000
 EXPOSE 3000
