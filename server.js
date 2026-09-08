@@ -13,8 +13,10 @@ const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'employees.json');
 const TASK_FILE = path.join(DATA_DIR, 'tasks.json');
+const PAYROLL_FILE = path.join(DATA_DIR, 'payroll.json');
 const SEED_FILE = path.join(__dirname, 'seed.json');
 const TASK_SEED_FILE = path.join(__dirname, 'taskSeed.json');
+const PAYROLL_SEED_FILE = path.join(__dirname, 'payrollSeed.json');
 const AI_CONFIG_FILE = path.join(DATA_DIR, 'ai-config.json');
 
 // 默认 LLM 配置（OpenAI 兼容协议，覆盖国内外主流厂商）
@@ -61,6 +63,11 @@ function ensureStore() {
     const seed = fs.existsSync(TASK_SEED_FILE) ? JSON.parse(fs.readFileSync(TASK_SEED_FILE, 'utf8')) : [];
     fs.writeFileSync(TASK_FILE, JSON.stringify(resolveTaskDates(seed), null, 2));
     console.log(`[HR] 已用种子数据初始化：${seed.length} 条任务`);
+  }
+  if (!fs.existsSync(PAYROLL_FILE)) {
+    const seed = fs.existsSync(PAYROLL_SEED_FILE) ? JSON.parse(fs.readFileSync(PAYROLL_SEED_FILE, 'utf8')) : [];
+    fs.writeFileSync(PAYROLL_FILE, JSON.stringify(seed, null, 2));
+    console.log(`[HR] 已用种子数据初始化：${seed.length} 条工资记录`);
   }
 }
 
@@ -144,6 +151,14 @@ function makeCrud(basePath, file, idPrefix, numericFields = []) {
 makeCrud('/api/employees', DB_FILE, 'E', ['salary', 'age', 'tenure']);
 // 任务（新增）
 makeCrud('/api/tasks', TASK_FILE, 'T', ['progress', 'hours']);
+// 工资表（薪酬驾驶舱，行级明细，对齐"2026年8月工资表"模板列）
+makeCrud('/api/payroll', PAYROLL_FILE, 'PR', [
+  'basic', 'secrecy', 'perf', 'postAllowance', 'otherAllowance', 'gross',
+  'lateDeduct', 'sickDeduct', 'affairDeduct', 'otherDeduct', 'deductTotal', 'payable',
+  'pension', 'medical', 'unemploy', 'housingFund', 'socialTotal',
+  'childEdu', 'continueEdu', 'interest', 'rent', 'infantCare', 'parentCare', 'specialDeductTotal',
+  'taxableThis', 'taxableCum', 'taxThis', 'taxCum', 'taxPaid', 'netPay',
+]);
 
 // ============================================================
 //  AI（大语言模型）接口
