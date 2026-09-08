@@ -270,64 +270,204 @@ function renderPersonnel() {
 }
 
 // ---------- 薪资看板 ----------
-function renderSalary() {
+// ---------- 薪酬驾驶舱（数据来自后端 /api/payroll，对齐工资表模板列）----------
+// 员工明细只有单个 salary，工资表是独立行级明细(含基本/绩效/津贴/社保/个税/实发等分项)，
+// 二者相互独立：驾驶舱不依赖 AGG/员工明细，单独读 payroll 数据集。
+let PAYROLL = [];            // 后端 /api/payroll 全量
+let PAYROLL_PERIOD = '2026-08';   // 当前展示月份
+let payrollInited = false;
+
+async function loadPayroll() {
+  try {
+    const data = await apiGet('/payroll');
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.warn('[HR] payroll 接口不可用，回退内置：', e.message);
+    return [];
+  }
+}
+async function ensurePayrollLoaded() {
+  if (payrollInited) return;
+  PAYROLL = await loadPayroll();
+  const periods = [...new Set(PAYROLL.map(p => p.period))];
+  if (periods.length) PAYROLL_PERIOD = periods[0];
+  payrollInited = true;
+}
+
+// 对 payroll 行计算驾驶舱聚合（仿 computeAggregates，纯函数）
+function computePayrollAgg(rows) {
+  const sum = (k) => rows.reduce((s, r) => s + (Number(r[k]) || 0), 0);
+  const r2 = v => Math.round(v * 100) / 100; // 消除浮点尾数
+  const n = rows.length;
+  const payable = r2(sum('payable')), net = r2(sum('netPay'));
+  const social = r2(sum('socialTotal')), tax = r2(sum('taxThis'));
+  const a = {
+    count: n,
+    deptCount: new Set(rows.map(r => r.dept)).size,
+    payable, net, social, tax,
+    burden: social + tax,                       // 社保+个税负担
+    avgPayable: n ? Math.round(payable / n) : 0,
+    avgNet: n ? Math.round(net / n) : 0,
+    structure: [
+      { name: '基本工资', value: r2(sum('basic')) },
+      { name: '保密工资', value: r2(sum('secrecy')) },
+      { name: '绩效工资', value: r2(sum('perf')) },
+      { name: '岗位津贴', value: r2(sum('postAllowance')) },
+      { name: '其他补助', value: r2(sum('otherAllowance')) },
+    ],
+    burdenParts: [
+      { name: '养老保险', value: r2(sum('pension')) },
+      { name: '医疗保险', value: r2(sum('medical')) },
+      { name: '失业保险', value: r2(sum('unemploy')) },
+      { name: '住房公积金', value: r2(sum('housingFund')) },
+      { name: '个人所得税', value: tax },
+    ],
+    deductParts: [
+      { name: '迟到扣款', value: r2(sum('lateDeduct')) },
+      { name: '病假扣款', value: r2(sum('sickDeduct')) },
+      { name: '事假扣款', value: r2(sum('affairDeduct')) },
+      { name: '其他扣款', value: r2(sum('otherDeduct')) },
+    ],
+  };
+  a.gross = r2(sum('gross'));
+  a.burden = r2(a.burden);
+
+  // 部门维度聚合
+  const deptMap = {};
+  rows.forEach(r => {
+    deptMap[r.dept] = deptMap[r.dept] || { payable: 0, net: 0, social: 0, tax: 0, basic: 0, perf: 0, allowance: 0, n: 0, names: [] };
+    const d = deptMap[r.dept];
+    d.payable = r2(d.payable + r.payable); d.net = r2(d.net + r.netPay);
+    d.social = r2(d.social + r.socialTotal); d.tax = r2(d.tax + r.taxThis);
+    d.basic = r2(d.basic + r.basic); d.perf = r2(d.perf + r.perf);
+    d.allowance = r2(d.allowance + (r.postAllowance + r.otherAllowance));
+    d.n++; d.names.push(r.name);
+  });
+  a.dept = Object.keys(deptMap).map(k => {
+    const d = deptMap[k];
+    return {
+      dept: k, payable: d.payable, net: d.net, social: d.social, tax: d.tax, burden: r2(d.social + d.tax),
+      basic: d.basic, perf: d.perf, allowance: d.allowance,
+      n: d.n, avgPayable: Math.round(d.payable / d.n), avgNet: Math.round(d.net / d.n),
+      names: d.names.join('、'),
+    };
+  }).sort((x, y) => y.payable - x.payable);
+
+  // 平均个人工资条链路（应发→社保→个税→实发）
+  if (n) {
+    a.avgSlip = [
+      { step: '应发工资', val: Math.round(payable / n), type: 'total' },
+      { step: '三险一金', val: -Math.round(social / n), type: 'minus' },
+      { step: '个人所得税', val: -Math.round(tax / n), type: 'minus' },
+      { step: '实发工资', val: Math.round(net / n), type: 'result' },
+    ];
+  }
+  return a;
+}
+
+async function renderSalary() {
+  await ensurePayrollLoaded();
+  // 按当前月份过滤（本期单月）
+  const rows = PAYROLL.filter(p => p.period === PAYROLL_PERIOD);
+  if (!rows.length) { document.getElementById('salaryKpis').innerHTML = '<div class="empty-tip">暂无薪酬数据，请先在后端录入 payroll 记录。</div>'; return; }
+  const A = computePayrollAgg(rows);
+  const yuan = v => '¥' + v.toLocaleString();
+  const k = v => Math.round(v / 1000) + 'K';
+
   document.getElementById('salaryKpis').innerHTML = kpiHtml([
-    { label: '月均薪资', value: '¥' + AGG.avgSalary.toLocaleString(), delta: '', dir: 'up', icon: '💰' },
-    { label: '薪资总额/月', value: '¥' + Math.round(AGG.avgSalary * AGG.total / 1000).toLocaleString() + 'K', delta: '', dir: 'up', icon: '📊' },
-    { label: '最高部门均薪', value: '¥' + (AGG.deptAvgSalary[0] ? AGG.deptAvgSalary[0].avg.toLocaleString() : 0), delta: '', dir: 'up', icon: '🏆' },
-    { label: '在职人数', value: AGG.active, delta: '', dir: 'up', icon: '👥' },
-    { label: '离职人数', value: AGG.left, delta: '', dir: 'down', icon: '👋' },
+    { label: '应付总额', value: yuan(A.payable), delta: '', dir: 'up', icon: '💵' },
+    { label: '实发总额', value: yuan(A.net), delta: '', dir: 'up', icon: '💰' },
+    { label: '人均实发', value: yuan(A.avgNet), delta: '', dir: 'up', icon: '👤' },
+    { label: '社保+个税负担', value: yuan(A.burden), delta: '', dir: 'up', icon: '🧾' },
+    { label: '发放人数', value: A.count, delta: '', dir: 'up', icon: '👥' },
   ]);
+  document.getElementById('saPeriod').textContent = PAYROLL_PERIOD;
 
-  initChart('saHist').setOption({
-    grid: baseGrid,
-    tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: AGG.salaryHist.map(s => s.range), ...axisStyle },
-    yAxis: { type: 'value', ...axisStyle },
-    series: [{ type: 'bar', data: AGG.salaryHist.map(s => s.value),
-      itemStyle: { color: new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:'#4361ee'},{offset:1,color:'#8b5cf6'}]), borderRadius:[6,6,0,0] }, barWidth:'58%',
-      label: { show: true, position: 'top', formatter: '{c}', color: SOFT, fontSize: 11, fontWeight: 600 } }],
-  });
-
-  initChart('saDeptBar').setOption({
-    grid: { ...baseGrid, left: 70 },
-    tooltip: { trigger: 'axis', valueFormatter: v => '¥' + v.toLocaleString() },
-    xAxis: { type: 'value', ...axisStyle, axisLabel: { formatter: v => (v/1000)+'K', color: SOFT } },
-    yAxis: { type: 'category', data: AGG.deptAvgSalary.map(d => d.dept).reverse(), ...axisStyle },
-    series: [{ type: 'bar', data: AGG.deptAvgSalary.map(d => d.avg).reverse(),
-      itemStyle: { color: new echarts.graphic.LinearGradient(1,0,0,0,[{offset:0,color:'#2ec4b6'},{offset:1,color:'#48cae4'}]), borderRadius:[0,6,6,0] }, barWidth:'55%',
-      label: { show: true, position: 'right', formatter: '¥{c}', color: SOFT, fontSize: 11, fontWeight: 600 } }],
-  });
-
-  initChart('saLevel').setOption({
-    grid: baseGrid,
-    tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: AGG.salaryLevel.map(s => s.level), ...axisStyle },
-    yAxis: { type: 'value', ...axisStyle },
-    series: [{ type: 'bar', data: AGG.salaryLevel.map(s => s.count),
-      itemStyle: { color: new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:'#ff9f43'},{offset:1,color:'#ffd6a5'}]), borderRadius:[6,6,0,0] }, barWidth:'52%',
-      label: { show: true, position: 'top', formatter: '{c}', color: SOFT, fontSize: 11, fontWeight: 600 } }],
-  });
-
-  initChart('saBudget').setOption({
-    grid: baseGrid,
-    tooltip: { trigger: 'axis', valueFormatter: v => '¥' + v + 'M' },
-    legend: { top: 0, textStyle: { color: SOFT } },
-    xAxis: { type: 'category', data: HR.budgetMonths, ...axisStyle },
-    yAxis: { type: 'value', ...axisStyle },
+  // 1) 部门薪酬成本构成（堆叠条：基本/绩效/津贴补助）
+  const deptAsc = A.dept.slice().reverse();
+  initChart('saDeptStack').setOption({
+    grid: { ...baseGrid, left: 78, right: 60 },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, valueFormatter: v => yuan(v) },
+    legend: { top: 0, textStyle: { color: SOFT }, data: ['基本工资', '绩效工资', '津贴补助'] },
+    xAxis: { type: 'value', ...axisStyle, axisLabel: { formatter: k, color: SOFT } },
+    yAxis: { type: 'category', data: deptAsc.map(d => d.dept), ...axisStyle },
     series: [
-      { name: '预算', type: 'line', smooth: true, data: HR.budgetPlan, lineStyle: { width: 3, color: '#8b5cf6' }, itemStyle: { color: '#8b5cf6' }, areaStyle: { opacity: .06 },
-        label: { show: true, position: 'top', formatter: '{c}M', color: '#8b5cf6', fontSize: 11, fontWeight: 600 } },
-      { name: '实际', type: 'line', smooth: true, data: HR.budgetActual, lineStyle: { width: 3, color: '#2ec4b6' }, itemStyle: { color: '#2ec4b6' },
-        label: { show: true, position: 'bottom', formatter: '{c}M', color: '#2ec4b6', fontSize: 11, fontWeight: 600 } },
+      { name: '基本工资', type: 'bar', stack: 'cost', barWidth: '58%', itemStyle: { color: '#4361ee' }, data: deptAsc.map(d => d.basic) },
+      { name: '绩效工资', type: 'bar', stack: 'cost', itemStyle: { color: '#2ec4b6' }, data: deptAsc.map(d => d.perf) },
+      { name: '津贴补助', type: 'bar', stack: 'cost', itemStyle: { color: '#ff9f43' }, data: deptAsc.map(d => d.allowance) },
     ],
   });
 
+  // 2) 部门人均应发 vs 人均实发（分组条）
+  const dAsc = A.dept.slice().reverse();
+  initChart('saDeptAvg').setOption({
+    grid: { ...baseGrid, left: 78, right: 50 },
+    tooltip: { trigger: 'axis', valueFormatter: v => yuan(v) },
+    legend: { top: 0, textStyle: { color: SOFT } },
+    xAxis: { type: 'value', ...axisStyle, axisLabel: { formatter: k, color: SOFT } },
+    yAxis: { type: 'category', data: dAsc.map(d => d.dept), ...axisStyle },
+    series: [
+      { name: '人均应发', type: 'bar', barWidth: 10, itemStyle: { color: '#8b5cf6' }, data: dAsc.map(d => d.avgPayable),
+        label: { show: true, position: 'right', color: '#8b5cf6', fontSize: 10, formatter: p => k(p.value) } },
+      { name: '人均实发', type: 'bar', barWidth: 10, itemStyle: { color: '#2ec4b6' }, data: dAsc.map(d => d.avgNet),
+        label: { show: true, position: 'right', color: '#2ec4b6', fontSize: 10, formatter: p => k(p.value) } },
+    ],
+  });
+
+  // 3) 全公司薪酬成本构成（环形）
+  initChart('saStructure').setOption({
+    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+    legend: { bottom: 0, textStyle: { color: SOFT } },
+    color: ['#4361ee', '#2ec4b6', '#ff9f43', '#8b5cf6', '#ee5a6f'],
+    series: [{
+      type: 'pie', radius: ['38%', '66%'], center: ['50%', '44%'],
+      avoidLabelOverlap: true,
+      label: { color: TEXT, formatter: '{b}\n{d}%', fontSize: 11 },
+      data: A.structure.filter(x => x.value > 0),
+    }],
+  });
+
+  // 4) 个税与社保负担分布（玫瑰/环形）
+  initChart('saBurden').setOption({
+    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+    legend: { bottom: 0, textStyle: { color: SOFT } },
+    color: ['#4361ee', '#2ec4b6', '#48cae4', '#ff9f43', '#ee5a6f'],
+    series: [{
+      type: 'pie', radius: ['20%', '66%'], roseType: 'radius', center: ['50%', '44%'],
+      itemStyle: { borderRadius: 4, borderColor: '#fff', borderWidth: 1 },
+      label: { color: TEXT, formatter: '{b}\n{c}', fontSize: 11 },
+      data: A.burdenParts.filter(x => x.value > 0),
+    }],
+  });
+
+  // 5) 平均工资条链路（应发 → 社保 → 个税 → 实发）
+  const slip = A.avgSlip || [];
+  initChart('saSlip').setOption({
+    grid: { ...baseGrid, left: 20, right: 20 },
+    tooltip: { trigger: 'axis', valueFormatter: v => yuan(v) },
+    xAxis: { type: 'category', data: slip.map(s => s.step), ...axisStyle },
+    yAxis: { type: 'value', ...axisStyle, axisLabel: { formatter: k, color: SOFT } },
+    series: [{
+      type: 'bar', data: slip.map(s => s.val),
+      barWidth: '42%',
+      itemStyle: { color: p => p.value >= 0 ? '#2ec4b6' : '#ee5a6f', borderRadius: [6, 6, 0, 0] },
+      label: { show: true, position: p => p.value >= 0 ? 'top' : 'bottom', color: TEXT, fontSize: 11, fontWeight: 600, formatter: p => yuan(p.value) },
+    }],
+  });
+
+  // 6) 部门成本 / 负担明细表
   const t = document.getElementById('saTable');
-  const fmt = v => '¥' + v.toLocaleString();
-  t.innerHTML = `<thead><tr><th>部门</th><th>基本工资</th><th>绩效工资</th><th>补贴</th><th>合计月均</th></tr></thead>
-    <tbody>${AGG.salaryTable.map(r => `<tr><td>${r.dept}</td><td>${fmt(r.base)}</td><td>${fmt(r.perf)}</td><td>${fmt(r.allowance)}</td><td>${fmt(r.total)}</td></tr>`).join('')}</tbody>`;
+  const fmt = yuan;
+  t.innerHTML = `<thead><tr><th>部门</th><th>人数</th><th>应付</th><th>实发</th><th>三险一金</th><th>个税</th><th>人均应发</th><th>人均实发</th></tr></thead>
+    <tbody>${A.dept.map(d => `<tr>
+      <td>${d.dept}</td>
+      <td>${d.n}</td><td>${fmt(d.payable)}</td><td>${fmt(d.net)}</td>
+      <td>${fmt(d.social)}</td><td>${fmt(d.tax)}</td>
+      <td>${fmt(d.avgPayable)}</td><td>${fmt(d.avgNet)}</td></tr>`).join('')}</tbody>`;
 }
+
+// 若后端数据变化，强制重绘（删除渲染缓存）
+function refreshSalary() { delete rendered.salary; return renderSalary(); }
 
 // ---------- 任务进度看板（数据驱动 + AI 分析）----------
 let TASKS = [];
@@ -718,6 +858,47 @@ const SMART_RULES = {
   amountKey: /(合同|方案|报价|发票|采购|订单|付款|费用|预算|工资|薪酬|项目|标的|金额|货款)/,
 };
 
+// ---- 业务场景库：开放句式（如"工商变更事宜"）也能智能反问缺失信息 ----
+// 场景命中后，把其 asks 中"确实缺失"的项转成追问。kind 取值：
+//   note    自由文本（对象/内容等）→ 写入 draft.extra[.key]
+//   material 材料/票据类（带常用选项）→ 写入 draft.extra.material
+//   amount / deadline / date / contact / priority  复用原有逻辑
+// key 命名与 extraLabel 用于把回答拼进可读备注。
+const SMART_SCENES = [
+  { key: /工商|变更|增资|减资|股权|注册|注销|执照|经营范围|法人|地址变更|经营地址/,
+    obj: '工商变更',
+    asks: [
+      { kind: 'note',    key: 'subject',  label: '涉及哪家公司 / 主体？',  demo: '公司全称', extraLabel: '涉及主体' },
+      { kind: 'note',    key: 'scope',    label: '具体要变更什么内容？',    demo: '如 经营范围 / 注册资本 / 股权 / 法人', extraLabel: '变更内容' },
+      { kind: 'material',key: 'material', label: '需要准备哪些材料？',      demo: '输入其他材料', extraLabel: '需准备材料',
+        options: ['章程修正案', '股东会决议', '营业执照正副本', '身份证明', '新地址证明'] },
+    ] },
+  { key: /报销|贴票|贴发票|费用报销/,
+    obj: '报销',
+    asks: [
+      { kind: 'note',     key: 'subject',  label: '报销什么项目 / 用途？', demo: '如 出差打车费 / 招待费', extraLabel: '报销项目' },
+      { kind: 'amount',   key: 'amount',   label: '金额是多少？' },
+      { kind: 'material', key: 'material', label: '票据类型？', demo: '输入其他类型', extraLabel: '票据类型',
+        options: ['增值税专用发票', '普票', '电子发票', '打车行程单', '无票（需说明）'] },
+    ] },
+  { key: /面试|招聘|候选人|约人|猎头|安排?面试/,
+    obj: '面试安排',
+    asks: [
+      { kind: 'note',     key: 'subject',  label: '面试哪个岗位 / 候选人？', demo: '如 前端工程师-李某某', extraLabel: '面试对象' },
+      { kind: 'note',     key: 'scope',    label: '面试官 / 形式？',         demo: '如 技术主管 / 视频面试', extraLabel: '面试安排' },
+      { kind: 'deadline', key: 'deadline', label: '预计哪天前完成？' },
+    ] },
+  // 通用兜底：凡出现开放事务词都主动反问关键信息，避免"识别不到"
+  { key: /事宜|事务|办理|处理|跟进|推进|安排|准备|申请|报备|申报|备案/,
+    obj: '', fallback: true,
+    asks: [
+      { kind: 'note',     key: 'subject',  label: '涉及哪个对象 / 单位？', demo: '公司 / 部门 / 联系人', extraLabel: '涉及对象' },
+      { kind: 'note',     key: 'scope',    label: '具体要做什么？',        demo: '一句话说明要点', extraLabel: '具体事项' },
+      { kind: 'deadline', key: 'deadline', label: '预计哪天前办完？' },
+      { kind: 'contact',  key: 'contact',  label: '和谁对接？' },
+    ] },
+];
+
 function smartDetectContact(text) {
   // 优先匹配 "X总/X经理/X哥/王老板" 等
   const titled = text.match(/([张王李赵刘陈杨黄周吴徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾肖田董袁潘蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向常][总经理老板哥哥姐长])/);
@@ -766,8 +947,21 @@ function smartComposeRemark(d) {
   if (d.amountText) parts.push('涉及金额约 ' + d.amountText + ' 元');
   if (d.timePhrase) parts.push('安排时间：' + d.timePhrase);
   if (d.contact) parts.push('对接人：' + d.contact);
-  const head = parts.length ? parts.join('；') + '。' : '';
-  return head + '原话：' + (d.raw || '');
+  // 场景自由文本（extra）：把回答结构化地拼进备注
+  if (d.extra && typeof d.extra === 'object') {
+    const ordered = [];
+    const labels = { subject: '涉及对象', scope: '具体内容', material: '需准备材料', note: '补充信息' };
+    Object.keys(d.extra).forEach(k => {
+      if (k.indexOf('__label_') === 0) return;                       // 跳过内部标签键
+      if (d.extra[k] == null || d.extra[k] === '') return;
+      const hasLbl = d.extra['__label_' + k];
+      const label = (hasLbl && typeof hasLbl === 'string' && hasLbl) || labels[k] || k;
+      ordered.push(label.replace(/[？?。.!！：:]\s*$/, '') + '：' + d.extra[k]);  // 去掉末尾标点
+    });
+    parts.push(ordered.join('；'));
+  }
+  const head = parts.filter(Boolean).join('；') + '。';
+  return (head === '。' ? '' : head) + '原话：' + (d.raw || '');
 }
 
 function smartParseByRules(text) {
@@ -786,7 +980,16 @@ function smartParseByRules(text) {
   draft.contact = smartDetectContact(text);
   // 对象/领域词（任务名后缀）
   const obj = text.match(/(合同|方案|报价单?|发票|采购单?|订单|报告|项目书?|计划书?|PPT|预算|简历|名单|清单|工资|招聘|回访|材料|资料)/);
-  const objWord = obj ? obj[1] : '';
+  let objWord = obj ? obj[1] : '';
+
+  // 场景识别：优先具体场景；通用兜底场景(fallback)只在"没有具体对象/领域词"时才启用，
+  // 避免把"合同事宜/处理发票事宜"等已能识别的话术误判成开放事务。
+  const specific = SMART_SCENES.find(s => !s.fallback && s.key.test(text));
+  const generic = SMART_SCENES.find(s => s.fallback && s.key.test(text));
+  let scene = specific || null;
+  if (!scene && generic && !objWord) scene = generic;   // 仅真正开放句式走兜底
+  if (scene) draft.scene = scene;              // 供反问阶段使用
+  if (scene && scene.obj && !objWord) objWord = scene.obj;
 
   // 时间与截止
   draft.due = smartResolveDate(text);
@@ -822,7 +1025,8 @@ function smartParseByRules(text) {
   if (objWord) tagSet.add(objWord);
   if (action) tagSet.add(action);
   if (timePhrase) tagSet.add(timePhrase);
-  draft.tags = [...tagSet].slice(0, 4);
+  if (scene && scene.obj) tagSet.add(scene.obj);
+  draft.tags = [...tagSet].slice(0, 5);
 
   // ---- 反问生成（缺什么问什么）----
   const qs = [];
@@ -836,20 +1040,37 @@ function smartParseByRules(text) {
   if (!/电话|通话/.test(text) && (/(沟通|确认|洽谈|拜访|对接)/.test(text) || draft.contact) && !draft.contact) {
     qs.push({ q: '和谁对接？', kind: 'contact', options: [] });
   }
-  if (!/(报告|发送|提交)/.test(action) && !/给自己|我来|我做|我自己/.test(text)) {
-    // 负责人默认留给弹窗选择，不问
-  }
   if (/(签|签约|什么时候|哪天签)/.test(text)) {
     qs.push({ q: '什么时候签？', kind: 'date', options: ['今天', '明天', '本周内', '自定义'] });
   }
-  // 去重 & 上限
+
+  // ---- 场景反问：命中业务场景后，把其中仍缺失的项补上 ----
+  // 用 ask 的 key 标记问题，回答时据此归类到 draft.extra[key] 或原生字段。
+  const asks = (draft.scene && draft.scene.asks) || [];
+  asks.forEach(a => {
+    // 已通过通用规则问过的原生字段不再重复
+    if (a.kind === 'amount' && (draft.amountText || qs.some(q => q.kind === 'amount'))) return;
+    if (a.kind === 'deadline' && (draft.due || qs.some(q => q.kind === 'deadline'))) return;
+    if (a.kind === 'date' && (draft.due || qs.some(q => q.kind === 'date'))) return;
+    if (a.kind === 'contact' && (draft.contact || qs.some(q => q.kind === 'contact'))) return;
+    // note/material：写进 extra，除非已答过同 key
+    if ((a.kind === 'note' || a.kind === 'material') && draft.extra && draft.extra[a.key]) return;
+    if (qs.some(q => q.key === a.key)) return;
+    qs.push({
+      q: a.label, kind: a.kind, key: a.key || '',
+      options: a.options || [], demo: a.demo || '',
+      extraLabel: a.extraLabel || a.label,
+    });
+  });
+
+  // 去重 & 上限（场景化开放事务放宽到 5 条，让反问更完整）
   const seen = new Set();
-  draft.questions = qs.filter(q => { if (seen.has(q.q)) return false; seen.add(q.q); return true; }).slice(0, 3);
+  draft.questions = qs.filter(q => { if (seen.has(q.q)) return false; seen.add(q.q); return true; }).slice(0, 5);
   return draft;
 }
 
-// 根据草稿 + 回答更新草稿（kind 处理）
-function smartApplyAnswer(draft, qKind, answer) {
+// 根据草稿 + 回答更新草稿（kind 处理；qKey 用于归类场景自由文本）
+function smartApplyAnswer(draft, qKind, answer, qKey, qExtraLabel) {
   if (!answer) return;
   if (qKind === 'amount') {
     const m = String(answer).match(/(\d+(?:\.\d+)?)\s*(万|万元|元|块|k|K)?/);
@@ -873,6 +1094,14 @@ function smartApplyAnswer(draft, qKind, answer) {
     draft.contact = answer;
   } else if (qKind === 'priority') {
     draft.priority = ['高', '中', '低'].includes(answer) ? answer : draft.priority;
+  } else if (qKind === 'note' || qKind === 'material') {
+    // 场景自由文本：写入 extra，键用 scene ask 的 key，未命名键归并到 note
+    draft.extra = draft.extra || {};
+    const key = qKey || 'note';
+    const label = qExtraLabel || (key === 'subject' ? '涉及对象' : key === 'scope' ? '具体内容' : '补充信息');
+    const labelKey = '__label_' + key;
+    draft.extra[key] = String(answer).trim();
+    draft.extra[labelKey] = label;
   }
   // 更新备注中的结构化信息（保留原话）
   draft.remark = smartComposeRemark(draft);
@@ -895,6 +1124,16 @@ function smartRender() {
   if (fmtMoney) fields.push(`<span>金额：<b>${fmtMoney}</b></span>`);
   if (d.contact) fields.push(`<span>对接：<b>${esc(d.contact)}</b></span>`);
   if (d.priority) fields.push(`<span>优先级：<b>${esc(d.priority)}</b></span>`);
+  // 已答的场景信息也展示在字段条（取短摘要）
+  if (d.extra && typeof d.extra === 'object') {
+    const ex = d.extra;
+    Object.keys(ex).forEach(k => {
+      if (k.indexOf('__label_') === 0 || ex[k] == null || ex[k] === '') return;
+      const hasLbl = ex['__label_' + k];
+      const label = (hasLbl && typeof hasLbl === 'string' && hasLbl) || k;
+      fields.push(`<span>${esc(label.replace(/[？?。.!！：:]\s*$/, ''))}：<b>${esc(String(ex[k]).slice(0, 18))}</b></span>`);
+    });
+  }
   const fieldHtml = fields.length ? `<div class="sr-fields">${fields.join('')}</div>` : '';
   const src = smartState.hasKey ? 'LLM 解析' : '规则引擎';
   panel.innerHTML = `
@@ -908,11 +1147,11 @@ function smartRender() {
       ${(d.questions && d.questions.length) ? `<div class="q-block">
         <div class="q-title">🤔 请确认以下信息（点选项或直接填）：</div>
         ${d.questions.map((q, i) => `
-          <div class="q-item" data-kind="${q.kind}">
+          <div class="q-item" data-kind="${q.kind}" data-key="${esc(q.key || '')}" data-label="${esc(q.extraLabel || '')}">
             <div class="q-line">
               <span class="q-text">${esc(q.q)}</span>
               ${(q.options || []).filter(o => o !== '自定义').map(o => `<button class="q-opt" data-ans="${esc(o)}">${esc(o)}</button>`).join('')}
-              <input class="q-input" placeholder="自定义 / 直接输入" data-idx="${i}" />
+              <input class="q-input" placeholder="${esc(q.demo || '直接输入')}" data-idx="${i}" />
             </div>
           </div>`).join('')}
       </div>` : `<div class="sr-fields" style="color:#12817a">✅ 信息已齐全，可保存。</div>`}
@@ -926,7 +1165,7 @@ function smartRender() {
   panel.querySelectorAll('.q-opt').forEach(b => {
     b.onclick = () => {
       const item = b.closest('.q-item');
-      smartApplyAnswer(smartState.draft, item.dataset.kind, b.dataset.ans);
+      smartApplyAnswer(smartState.draft, item.dataset.kind, b.dataset.ans, item.dataset.key, item.dataset.label);
       smartRerenderQuestions();
     };
   });
@@ -935,7 +1174,7 @@ function smartRender() {
     inp.onkeydown = e => {
       if (e.key === 'Enter') {
         const item = inp.closest('.q-item');
-        if (inp.value.trim()) smartApplyAnswer(smartState.draft, item.dataset.kind, inp.value.trim());
+        if (inp.value.trim()) smartApplyAnswer(smartState.draft, item.dataset.kind, inp.value.trim(), item.dataset.key, item.dataset.label);
         smartRerenderQuestions();
       }
     };
@@ -960,6 +1199,7 @@ function smartRerenderQuestions() {
     if (q.kind === 'date' && d.due) return false;
     if (q.kind === 'contact' && d.contact) return false;
     if (q.kind === 'priority' && d.priority) return false;
+    if ((q.kind === 'note' || q.kind === 'material') && q.key && d.extra && d.extra[q.key]) return false;
     return true;
   });
   smartRender();
@@ -2040,18 +2280,21 @@ async function switchView(view) {
   const titles = {
     overview: ['数据总览', '全公司人力资源核心指标概览'],
     personnel: ['人员看板', '员工结构、流动与分布分析'],
-    salary: ['薪资看板', '薪酬水平、结构与成本分析'],
+    salary: ['薪酬驾驶舱', '成本构成、部门对比、实发与税负分析'],
     tasks: ['任务进度看板', '重点工作进度与交付追踪'],
     employees: ['员工明细', '员工搜索、筛选、排序与导出'],
   };
   document.getElementById('viewTitle').textContent = titles[view][0];
   document.getElementById('viewSub').textContent = titles[view][1];
 
-  // 任务看板依赖后端数据，需异步加载后再渲染（此时容器已可见，尺寸正确）
+  // 任务/薪酬看板依赖后端数据，需异步加载后再渲染（此时容器已可见，尺寸正确）
   if (view === 'tasks') {
     await ensureTasksLoaded();
     renderTasks();
     rendered.tasks = true;
+  } else if (view === 'salary') {
+    await renderSalary();
+    rendered.salary = true;
   } else if (!rendered[view]) {
     renderers[view]();
     rendered[view] = true;
