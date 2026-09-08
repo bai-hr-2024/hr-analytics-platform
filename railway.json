@@ -1,6 +1,3 @@
-# Railway 一键部署配置（JSON 兼容，字段会被 Railway 识别）
-# 说明：Railway 支持直接从 GitHub 仓库导入并识别 Dockerfile / 或按 Nixpacks 自动构建。
-# 默认会用仓库根目录 Dockerfile 构建。此文件主要声明服务与健康检查。
 {
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
