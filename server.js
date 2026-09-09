@@ -52,19 +52,31 @@ function maskKey(k) {
   return k.slice(0, 6) + '***' + k.slice(-4);
 }
 
+function isEmptyJsonArray(file) {
+  if (!fs.existsSync(file)) return true;
+  const txt = fs.readFileSync(file, 'utf8').trim();
+  return txt === '' || txt === '[]';
+}
+
 function ensureStore() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(DB_FILE)) {
+  if (isEmptyJsonArray(DB_FILE)) {
     const seed = fs.existsSync(SEED_FILE) ? JSON.parse(fs.readFileSync(SEED_FILE, 'utf8')) : [];
     fs.writeFileSync(DB_FILE, JSON.stringify(seed, null, 2));
     console.log(`[HR] 已用种子数据初始化：${seed.length} 条员工`);
   }
-  if (!fs.existsSync(TASK_FILE)) {
+  if (isEmptyJsonArray(TASK_FILE)) {
     const seed = fs.existsSync(TASK_SEED_FILE) ? JSON.parse(fs.readFileSync(TASK_SEED_FILE, 'utf8')) : [];
     fs.writeFileSync(TASK_FILE, JSON.stringify(resolveTaskDates(seed), null, 2));
     console.log(`[HR] 已用种子数据初始化：${seed.length} 条任务`);
   }
-  if (!fs.existsSync(PAYROLL_FILE)) {
+  // 薪酬为演示数据：每次启动都强制用种子数据重建，保证驾驶舱始终有可看的数据。
+  // 生产接入真实薪酬库后可移除 forcePayrollSeed=true。
+  if (process.env.FORCE_PAYROLL_SEED !== 'false') {
+    const seed = fs.existsSync(PAYROLL_SEED_FILE) ? JSON.parse(fs.readFileSync(PAYROLL_SEED_FILE, 'utf8')) : [];
+    fs.writeFileSync(PAYROLL_FILE, JSON.stringify(seed, null, 2));
+    console.log(`[HR] 薪酬演示数据已重置：${seed.length} 条工资记录`);
+  } else if (isEmptyJsonArray(PAYROLL_FILE)) {
     const seed = fs.existsSync(PAYROLL_SEED_FILE) ? JSON.parse(fs.readFileSync(PAYROLL_SEED_FILE, 'utf8')) : [];
     fs.writeFileSync(PAYROLL_FILE, JSON.stringify(seed, null, 2));
     console.log(`[HR] 已用种子数据初始化：${seed.length} 条工资记录`);
