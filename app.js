@@ -15,6 +15,12 @@ const axisStyle = {
 };
 
 // ---------- 通用渲染 ----------
+// 期间展示：'2026-02' -> '2026年2月'（去掉月份前导 0）
+function fmtPeriod(p) {
+  const m = String(p || '').match(/^(\d{4})-(\d{1,2})$/);
+  return m ? (m[1] + '年' + Number(m[2]) + '月') : String(p || '');
+}
+
 function kpiHtml(list) {
   return list.map(k => {
     const clickable = k.status ? ` data-status="${k.status}"` : (k.onclick ? ' data-onclick' : '');
@@ -319,7 +325,7 @@ function rebuildPeriodSel() {
   PAYROLL_PERIODS.forEach(p => {
     const o = document.createElement('option');
     o.value = p;
-    o.textContent = p.replace('-', '年') + '月';
+    o.textContent = fmtPeriod(p);
     sel.appendChild(o);
   });
   sel.value = PAYROLL_PERIODS.includes(PAYROLL_PERIOD) ? PAYROLL_PERIOD : PAYROLL_PERIODS[0];
@@ -415,7 +421,7 @@ async function renderSalary() {
   // 同步顶部期间显示与下拉选中
   const sel = document.getElementById('saPeriodSel');
   if (sel && PAYROLL_PERIODS.includes(PAYROLL_PERIOD)) sel.value = PAYROLL_PERIOD;
-  document.getElementById('saPeriod').textContent = PAYROLL_PERIOD.replace('-', '年') + '月';
+  document.getElementById('saPeriod').textContent = fmtPeriod(PAYROLL_PERIOD);
 
   // 1) 部门薪酬成本构成（堆叠条：基本/绩效/津贴补助）
   const deptAsc = A.dept.slice().reverse();
@@ -527,6 +533,271 @@ function initSalaryControls() {
     btn.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', handleSalaryImport);
   }
+}
+
+// ============================================================
+//  绩效驾驶舱（数据来自 /api/performance）
+//  模式与薪酬驾驶舱一致：期间下拉切换、上传 Excel 导入、长期保存。
+// ============================================================
+let PERFORMANCE = [];
+let PERFORMANCE_PERIOD = '';
+let PERFORMANCE_PERIODS = [];
+let performanceInited = false;
+let pfControlsInited = false;
+
+// 等级阈值（可调）：≥90 优秀 / 80-89 良好 / 70-79 合格 / <70 待改进
+const GRADE_RULES = [
+  { min: 90, grade: '优秀', color: '#2ec4b6' },
+  { min: 80, grade: '良好', color: '#4361ee' },
+  { min: 70, grade: '合格', color: '#ff9f43' },
+  { min: -Infinity, grade: '待改进', color: '#ee5a6f' },
+];
+const GRADE_ORDER = GRADE_RULES.map(r => r.grade);
+const GRADE_COLOR = Object.fromEntries(GRADE_RULES.map(r => [r.grade, r.color]));
+function gradeOf(score, rules = GRADE_RULES) {
+  const s = Number(score);
+  if (!Number.isFinite(s)) return '';
+  return (rules.find(r => s >= r.min) || rules[rules.length - 1]).grade;
+}
+
+async function loadPerformance() {
+  try {
+    const data = await apiGet('/performance');
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.warn('[HR] performance 接口不可用：', e.message);
+    return [];
+  }
+}
+function refreshPerfPeriodsFromData() {
+  PERFORMANCE_PERIODS = [...new Set(PERFORMANCE.map(p => p.period))].filter(Boolean).sort().reverse();
+  rebuildPerfPeriodSel();
+}
+async function ensurePerformanceLoaded() {
+  if (performanceInited) return;
+  PERFORMANCE = await loadPerformance();
+  refreshPerfPeriodsFromData();
+  if (PERFORMANCE_PERIODS.length && !PERFORMANCE_PERIODS.includes(PERFORMANCE_PERIOD)) PERFORMANCE_PERIOD = PERFORMANCE_PERIODS[0];
+  performanceInited = true;
+}
+function rebuildPerfPeriodSel() {
+  const sel = document.getElementById('pfPeriodSel');
+  if (!sel) return;
+  sel.innerHTML = '';
+  if (!PERFORMANCE_PERIODS.length) {
+    const o = document.createElement('option'); o.value = ''; o.textContent = '暂无期间';
+    sel.appendChild(o); return;
+  }
+  PERFORMANCE_PERIODS.forEach(p => {
+    const o = document.createElement('option');
+    o.value = p; o.textContent = fmtPeriod(p);
+    sel.appendChild(o);
+  });
+  sel.value = PERFORMANCE_PERIODS.includes(PERFORMANCE_PERIOD) ? PERFORMANCE_PERIOD : PERFORMANCE_PERIODS[0];
+}
+async function reloadPerfData() {
+  PERFORMANCE = await loadPerformance();
+  refreshPerfPeriodsFromData();
+  if (PERFORMANCE_PERIODS.length && !PERFORMANCE_PERIODS.includes(PERFORMANCE_PERIOD)) PERFORMANCE_PERIOD = PERFORMANCE_PERIODS[0];
+  delete rendered.performance;
+  await renderPerformance();
+}
+function refreshPerformance() { delete rendered.performance; return renderPerformance(); }
+
+// 绩效聚合（纯函数；trend 用全局 PERFORMANCE 跨期间）
+function computePerformanceAgg(rows) {
+  const r2 = v => Math.round(v * 100) / 100;
+  const scores = rows.map(r => Number(r.score) || 0);
+  const sum = scores.reduce((a, b) => a + b, 0);
+  const avg = scores.length ? r2(sum / scores.length) : 0;
+  const gradeDist = GRADE_ORDER.map(g => ({ name: g, value: rows.filter(r => r.grade === g).length }));
+  // 部门聚合
+  const deptMap = {};
+  rows.forEach(r => {
+    const d = deptMap[r.dept] = deptMap[r.dept] || { dept: r.dept, n: 0, sum: 0, max: -Infinity, min: Infinity, dist: { '优秀': 0, '良好': 0, '合格': 0, '待改进': 0 }, names: [] };
+    const s = Number(r.score) || 0;
+    d.n++; d.sum += s; d.max = Math.max(d.max, s); d.min = Math.min(d.min, s);
+    if (d.dist[r.grade] !== undefined) d.dist[r.grade]++;
+    d.names.push(r.name);
+  });
+  const dept = Object.values(deptMap).map(d => ({
+    dept: d.dept, n: d.n, avg: r2(d.sum / d.n), max: d.max, min: d.min, dist: d.dist,
+    excellentRate: d.n ? r2((d.dist['优秀'] + d.dist['良好']) * 100 / d.n) : 0,
+    names: d.names.join('、'),
+  })).sort((a, b) => b.avg - a.avg);
+  // 指标聚合（遍历所有员工 indicators，按指标名归并）
+  const indMap = {};
+  rows.forEach(p => (p.indicators || []).forEach(it => {
+    const key = String(it.name || '').trim();
+    if (!key) return;
+    const o = indMap[key] = indMap[key] || { name: key, weight: Number(it.weight) || 0, n: 0, scoreSum: 0, selfSum: 0, supSum: 0, supN: 0 };
+    o.n++; o.scoreSum += Number(it.score) || 0; o.selfSum += Number(it.selfScore) || 0;
+    if (Number.isFinite(Number(it.supScore))) { o.supSum += Number(it.supScore) || 0; o.supN++; }
+  }));
+  const indicators = Object.values(indMap).map(o => ({
+    name: o.name, weight: o.weight, n: o.n,
+    avgScore: r2(o.scoreSum / o.n), avgSelf: r2(o.selfSum / o.n),
+    avgSup: o.supN ? r2(o.supSum / o.supN) : 0,
+  })).sort((a, b) => b.avgScore - a.avgScore);
+  // 趋势（全部期间平均分）
+  const pMap = {};
+  PERFORMANCE.forEach(r => {
+    const p = pMap[r.period] = pMap[r.period] || { period: r.period, n: 0, sum: 0 };
+    p.n++; p.sum += Number(r.score) || 0;
+  });
+  const trend = Object.values(pMap).sort((a, b) => a.period.localeCompare(b.period))
+    .map(p => ({ period: p.period, avgScore: r2(p.sum / p.n), n: p.n }));
+  return {
+    count: rows.length,
+    deptCount: new Set(rows.map(r => r.dept)).size,
+    avg, max: scores.length ? Math.max(...scores) : 0, min: scores.length ? Math.min(...scores) : 0,
+    excellentRate: rows.length ? r2(rows.filter(r => r.grade === '优秀' || r.grade === '良好').length * 100 / rows.length) : 0,
+    gradeDist, dept, indicators, trend,
+  };
+}
+
+async function renderPerformance() {
+  await ensurePerformanceLoaded();
+  const rows = PERFORMANCE.filter(p => p.period === PERFORMANCE_PERIOD);
+  const kpiEl = document.getElementById('performanceKpis');
+  if (!kpiEl) return;
+  if (!rows.length) {
+    kpiEl.innerHTML = '<div class="empty-tip">暂无绩效数据，请点击右上角「导入绩效表」上传考核表。</div>';
+    return;
+  }
+  const A = computePerformanceAgg(rows);
+  kpiEl.innerHTML = kpiHtml([
+    { label: '平均绩效得分', value: A.avg, delta: '', dir: 'up', icon: '🎯' },
+    { label: '优良率', value: A.excellentRate + '%', delta: '', dir: 'up', icon: '🌟' },
+    { label: '参评人数', value: A.count, delta: '', dir: 'up', icon: '👥' },
+    { label: '覆盖部门', value: A.deptCount, delta: '', dir: 'up', icon: '🏢' },
+    { label: '最高分', value: A.max, delta: '', dir: 'up', icon: '🥇' },
+  ]);
+  const sel = document.getElementById('pfPeriodSel');
+  if (sel && PERFORMANCE_PERIODS.includes(PERFORMANCE_PERIOD)) sel.value = PERFORMANCE_PERIOD;
+  document.getElementById('pfPeriod').textContent = fmtPeriod(PERFORMANCE_PERIOD);
+
+  // 1) 绩效等级分布（环形）
+  initChart('pfGradePie').setOption({
+    tooltip: { trigger: 'item', formatter: '{b}: {c} 人 ({d}%)' },
+    legend: { bottom: 0, textStyle: { color: SOFT } },
+    color: GRADE_ORDER.map(g => GRADE_COLOR[g]),
+    series: [{
+      type: 'pie', radius: ['38%', '66%'], center: ['50%', '44%'], avoidLabelOverlap: true,
+      label: { color: TEXT, formatter: '{b}\n{d}%', fontSize: 11 },
+      data: A.gradeDist.filter(x => x.value > 0),
+    }],
+  });
+
+  // 2) 各部门平均分（横向条，含最高/最低参考线）
+  const dAsc = A.dept.slice().reverse();
+  initChart('pfDeptBar').setOption({
+    grid: { ...baseGrid, left: 88, right: 60 },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    xAxis: { type: 'value', ...axisStyle },
+    yAxis: { type: 'category', data: dAsc.map(d => d.dept), ...axisStyle },
+    series: [{
+      name: '平均分', type: 'bar', barWidth: '52%',
+      itemStyle: { color: '#4361ee', borderRadius: [0, 6, 6, 0] },
+      label: { show: true, position: 'right', color: TEXT, fontSize: 11, fontWeight: 600, formatter: p => p.value },
+      data: dAsc.map(d => d.avg),
+    }],
+  });
+
+  // 3) 绩效趋势（折线）
+  initChart('pfTrendLine').setOption({
+    grid: { ...baseGrid, left: 48, right: 30 },
+    tooltip: { trigger: 'axis' },
+    xAxis: { type: 'category', data: A.trend.map(t => fmtPeriod(t.period)), ...axisStyle },
+    yAxis: { type: 'value', ...axisStyle },
+    series: [{
+      name: '平均分', type: 'line', smooth: true, symbolSize: 8,
+      itemStyle: { color: '#2ec4b6' }, lineStyle: { width: 3, color: '#2ec4b6' },
+      areaStyle: { color: 'rgba(46,196,182,0.12)' },
+      label: { show: true, color: TEXT, fontSize: 11, fontWeight: 600 },
+      data: A.trend.map(t => t.avgScore),
+    }],
+  });
+
+  // 4) 考核指标平均得分（横向条 Top，按 avgScore 降序）
+  const inds = A.indicators.slice(0, 10).reverse();
+  initChart('pfIndScore').setOption({
+    grid: { ...baseGrid, left: 130, right: 50 },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    xAxis: { type: 'value', ...axisStyle },
+    yAxis: { type: 'category', data: inds.map(i => i.name), ...axisStyle, axisLabel: { color: SOFT, fontSize: 11, width: 120, overflow: 'truncate' } },
+    series: [{
+      name: '平均得分', type: 'bar', barWidth: '56%',
+      itemStyle: { color: '#8b5cf6', borderRadius: [0, 6, 6, 0] },
+      label: { show: true, position: 'right', color: TEXT, fontSize: 11, formatter: p => p.value },
+      data: inds.map(i => i.avgScore),
+    }],
+  });
+
+  // 5) 自评 vs 上级评分对比（分组条）
+  const cmp = A.indicators.slice(0, 10).reverse();
+  initChart('pfIndCompare').setOption({
+    grid: { ...baseGrid, left: 130, right: 40 },
+    tooltip: { trigger: 'axis' },
+    legend: { top: 0, textStyle: { color: SOFT } },
+    xAxis: { type: 'value', ...axisStyle },
+    yAxis: { type: 'category', data: cmp.map(i => i.name), ...axisStyle, axisLabel: { color: SOFT, fontSize: 11, width: 120, overflow: 'truncate' } },
+    series: [
+      { name: '自评均值', type: 'bar', barWidth: 9, itemStyle: { color: '#4361ee' }, data: cmp.map(i => i.avgSelf) },
+      { name: '上级均值', type: 'bar', barWidth: 9, itemStyle: { color: '#2ec4b6' }, data: cmp.map(i => i.avgSup) },
+    ],
+  });
+
+  // 6) 指标权重 × 平均得分（散点）
+  initChart('pfIndWeight').setOption({
+    grid: { ...baseGrid, left: 48, right: 30, top: 30, bottom: 40 },
+    tooltip: { formatter: p => `${p.data[2]}<br/>权重: ${p.data[0]}<br/>平均得分: ${p.data[1]}` },
+    xAxis: { type: 'value', name: '权重', ...axisStyle, nameTextStyle: { color: SOFT } },
+    yAxis: { type: 'value', name: '平均得分', ...axisStyle, nameTextStyle: { color: SOFT } },
+    series: [{
+      type: 'scatter', symbolSize: 16,
+      itemStyle: { color: '#ff9f43' },
+      label: { show: true, position: 'right', color: TEXT, fontSize: 10, formatter: p => p.data[2].slice(0, 6) },
+      data: A.indicators.map(i => [i.weight, i.avgScore, i.name]),
+    }],
+  });
+
+  // 7) 员工绩效明细表
+  const t = document.getElementById('pfTable');
+  const list = rows.slice().sort((a, b) => (Number(b.score) || 0) - (Number(a.score) || 0));
+  t.innerHTML = `<thead><tr><th>姓名</th><th>部门</th><th>岗位</th><th>自评</th><th>上级</th><th>结果分</th><th>等级</th><th>指标数</th></tr></thead>
+    <tbody>${list.map(r => `<tr>
+      <td>${r.name}</td><td>${r.dept || '—'}</td><td>${r.post || '—'}</td>
+      <td>${r.selfScore || 0}</td><td>${r.supScore || 0}</td><td><b>${r.score}</b></td>
+      <td><span class="tag" style="background:${GRADE_COLOR[r.grade] || '#cdd7ec'};color:#fff">${r.grade || '—'}</span></td>
+      <td>${r.indicatorCount || 0}</td></tr>`).join('')}</tbody>`;
+
+  // 8) 考核指标明细表（本期所有指标聚合）
+  const it = document.getElementById('pfIndTable');
+  if (A.indicators.length) {
+    it.innerHTML = `<thead><tr><th>考核指标</th><th>权重</th><th>参与人数</th><th>自评均值</th><th>上级均值</th><th>结果均分</th></tr></thead>
+      <tbody>${A.indicators.map(i => `<tr>
+        <td>${i.name}</td><td>${i.weight}</td><td>${i.n}</td>
+        <td>${i.avgSelf}</td><td>${i.avgSup}</td><td><b>${i.avgScore}</b></td></tr>`).join('')}</tbody>`;
+  } else {
+    it.innerHTML = '<tbody><tr><td class="empty-tip">本期数据来自汇总表，无指标明细</td></tr></tbody>';
+  }
+}
+
+// 一次性绑定绩效驾驶舱控件
+function initPerfControls() {
+  if (pfControlsInited) return;
+  pfControlsInited = true;
+  const sel = document.getElementById('pfPeriodSel');
+  const btn = document.getElementById('btnPerfImport');
+  const fileInput = document.getElementById('perfImport');
+  const exp = document.getElementById('btnPerfExport');
+  if (sel) sel.addEventListener('change', () => { if (sel.value) { PERFORMANCE_PERIOD = sel.value; refreshPerformance(); } });
+  if (btn && fileInput) {
+    btn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', handlePerfImport);
+  }
+  if (exp) exp.addEventListener('click', exportPerformanceExcel);
 }
 
 // ---------- 任务进度看板（数据驱动 + AI 分析）----------
@@ -2354,11 +2625,11 @@ async function handleSalaryImport(e) {
     }
     // 若该期间已有数据，提示覆盖（按期间替换，不影响其它月份）
     if (PAYROLL_PERIODS.includes(period) && PAYROLL.some(p => p.period === period)) {
-      if (!confirm('期间 ' + period.replace('-', '年') + '月 已有 ' + PAYROLL.filter(p => p.period === period).length + ' 条记录，导入将覆盖该期间的旧数据，是否继续？')) { e.target.value = ''; return; }
+      if (!confirm('期间 ' + fmtPeriod(period) + ' 已有 ' + PAYROLL.filter(p => p.period === period).length + ' 条记录，导入将覆盖该期间的旧数据，是否继续？')) { e.target.value = ''; return; }
     }
     const res = await apiJson('/payroll/import', { period, rows }, 'POST');
     // 弹提示
-    let msg = '成功导入 ' + period.replace('-', '年') + '月 工资表：' + res.inserted + ' 条记录';
+    let msg = '成功导入 ' + fmtPeriod(period) + ' 工资表：' + res.inserted + ' 条记录';
     if (res.removed) msg += '（覆盖旧 ' + res.removed + ' 条）';
     if (res.linked) msg += '\n已同步更新员工花名册月薪 ' + res.linked + ' 人';
     if (res.unmatched) msg += '\n' + res.unmatched + ' 人在花名册未匹配到（可在员工明细中手动核对）';
@@ -2372,6 +2643,328 @@ async function handleSalaryImport(e) {
     alert('导入失败：' + err.message);
     e.target.value = '';
   }
+}
+
+// ============================================================
+//  绩效考核表 Excel 解析（双格式自动识别）
+//  格式A：单人多月表 —— 一个 sheet = 一个员工一个月，含指标明细行
+//        结构：r0 标题「绩效考核表（月度）」；r1「考核期间：...」；r2 姓名/岗位；
+//              r3-r4 双层表头；r5+ 指标行；"加权合计"行给出结果分。
+//        列位置(0-based)：A 业绩考核 / B 序号 / C 考核指标 / D 权重 / E 指标要求 /
+//              F 计算方法 / G 数据来源 / H 实际结果 / I 自评 / J 上级 / K 结果
+//  格式B：多人汇总表 —— 一个 sheet = 一个期间，每行一个员工
+//        表头关键词映射：姓名/部门/岗位/自评/上级/结果分/等级
+// ============================================================
+// 汇总表列名映射（按文本匹配，宽松）
+const PERF_SUM_COLS = {
+  '姓名': 'name', '员工': 'name', '被考核人': 'name',
+  '部门': 'dept', '所属部门': 'dept',
+  '岗位': 'post', '职位': 'post', '职级': 'post',
+  '自评': 'selfScore', '自评分': 'selfScore', '自评得分': 'selfScore',
+  '上级': 'supScore', '上级评分': 'supScore', '上级得分': 'supScore', '主管评分': 'supScore',
+  '结果分': 'score', '得分': 'score', '最终得分': 'score', '绩效得分': 'score', '综合得分': 'score',
+  '等级': 'grade', '绩效等级': 'grade',
+  '工号': 'empId', '编号': 'empId',
+};
+
+// 期间解析：'2025年12月' / '2025-12' -> '2025-12'
+function periodFromRangeText(txt) {
+  const s = String(txt || '');
+  let m = s.match(/(\d{4})\s*年\s*(\d{1,2})\s*月/) || s.match(/(\d{4})[-/.](\d{1,2})/);
+  if (m) return m[1] + '-' + String(Number(m[2])).padStart(2, '0');
+  return null;
+}
+// sheet 名解析期间；失败则回落到 sheet 内标题/考核期间行
+function periodFromSheetName(sheetName, ws) {
+  let p = periodFromRangeText(sheetName);
+  if (p) return p;
+  // 扫描前 3 行找期间文本
+  if (ws) {
+    for (let r = 0; r <= 2; r++) {
+      for (let c = 0; c <= 3; c++) {
+        const v = cleanCell(ws, r, c);
+        if (v && String(v).includes('期间')) {
+          const mm = periodFromRangeText(v);
+          if (mm) return mm;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+// 判断 sheet 属于哪种格式：出现「考核指标」列结构 => 单人表；出现「姓名+结果分」横向列 => 汇总表
+function detectPerfSheetType(ws) {
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+  let hasIndicatorHeader = false, hasSummaryHeader = false;
+  for (let r = 0; r <= Math.min(range.e.r, 8); r++) {
+    const cells = [];
+    for (let c = 0; c <= Math.min(range.e.c, 20); c++) cells.push(String(cleanCell(ws, r, c) || ''));
+    const line = cells.join('|');
+    if (line.includes('考核指标') || line.includes('指标要求') || line.includes('加权合计')) hasIndicatorHeader = true;
+    // 汇总表头：同行同时出现 姓名 与 (结果分|绩效得分|得分)
+    if (cells.includes('姓名') && cells.some(x => x === '结果分' || x === '绩效得分' || x === '综合得分' || x === '最终得分' || x === '得分')) hasSummaryHeader = true;
+  }
+  if (hasIndicatorHeader) return 'single';
+  if (hasSummaryHeader) return 'summary';
+  return 'unknown';
+}
+
+// 解析单人表 sheet -> { name, post, dept, selfScore, supScore, score, indicators: [...] } | null
+function parsePerfSingleSheet(ws) {
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+  let name = '', post = '', dept = '';
+  // 基础信息行：找「姓名」所在单元格，右侧非空单元格为姓名；「岗位/职位」右侧为岗位
+  //   也支持「部门」右侧为部门
+  for (let r = 0; r <= Math.min(range.e.r, 6); r++) {
+    for (let c = 0; c <= Math.min(range.e.c, 10); c++) {
+      const label = String(cleanCell(ws, r, c) || '').replace(/\s/g, '');
+      if (!label) continue;
+      if (label === '姓名' && !name) {
+        for (let k = c + 1; k <= c + 4; k++) { const v = cleanCell(ws, r, k); if (v !== '' && v !== undefined) { name = String(v).trim(); break; } }
+      } else if ((label === '岗位' || label === '职位') && !post) {
+        for (let k = c + 1; k <= c + 4; k++) { const v = cleanCell(ws, r, k); if (v !== '' && v !== undefined) { post = String(v).trim(); break; } }
+      } else if (label === '部门' && !dept) {
+        for (let k = c + 1; k <= c + 4; k++) { const v = cleanCell(ws, r, k); if (v !== '' && v !== undefined) { dept = String(v).trim(); break; } }
+      }
+    }
+  }
+  if (!name) return null;
+
+  // 定位指标表头行（含「考核指标」）
+  let headerRow = -1;
+  for (let r = 0; r <= Math.min(range.e.r, 10); r++) {
+    const cells = [];
+    for (let c = 0; c <= Math.min(range.e.c, 15); c++) cells.push(String(cleanCell(ws, r, c) || '').replace(/\s/g, ''));
+    if (cells.includes('考核指标')) { headerRow = r; break; }
+  }
+  if (headerRow < 0) return null;
+  // 表头可能有第二行给出「自评/上级/结果」细分；据此定位列
+  let colSeq = 1, colInd = 2, colWeight = 3, colReq = 4, colMethod = 5, colSource = 6, colActual = 7, colSelf = 8, colSup = 9, colRes = 10;
+  const subRow = headerRow + 1;
+  for (let c = 0; c <= Math.min(range.e.c, 15); c++) {
+    const v = String(cleanCell(ws, subRow, c) || '').replace(/\s/g, '');
+    if (v === '自评') colSelf = c;
+    else if (v === '上级') colSup = c;
+    else if (v === '结果') colRes = c;
+  }
+
+  const indicators = [];
+  let selfTotal = 0, supTotal = 0, resTotal = 0, resFound = false;
+  for (let r = headerRow + 2; r <= range.e.r; r++) {
+    const a0 = String(cleanCell(ws, r, 0) || '').replace(/\s/g, '');
+    const seqCell = cleanCell(ws, r, colSeq);
+    const indName = String(cleanCell(ws, r, colInd) || '').replace(/\s/g, '');
+    // 结束标记
+    if (!indName) continue;
+    if (indName.includes('加权合计') || indName.includes('合计')) {
+      // 合计行：取三列总分
+      const s = numVal(cleanCell(ws, r, colSelf));
+      const sp = numVal(cleanCell(ws, r, colSup));
+      const rs = numVal(cleanCell(ws, r, colRes));
+      if (s || sp || rs) { selfTotal = s; supTotal = sp; resTotal = rs; resFound = true; }
+      break;
+    }
+    // 只在 A 列（业绩考核）跨行标记或无标记的指标行：以序号为数字或指标名非空为准
+    const seqNum = Number(String(seqCell).trim());
+    if (!Number.isFinite(seqNum) && !/^\d+$/.test(String(seqCell).trim())) continue;
+    const weight = numVal(cleanCell(ws, r, colWeight));
+    if (!weight && !String(cleanCell(ws, r, colRes) || '').trim()) continue; // 空指标行
+    const rec = {
+      seq: Number(String(seqCell).trim()) || (indicators.length + 1),
+      name: indName.slice(0, 60),
+      weight,
+      requirement: String(cleanCell(ws, r, colReq) || '').trim().slice(0, 300),
+      method: String(cleanCell(ws, r, colMethod) || '').trim().slice(0, 200),
+      source: String(cleanCell(ws, r, colSource) || '').trim().slice(0, 100),
+      actual: String(cleanCell(ws, r, colActual) || '').trim().slice(0, 300),
+      selfScore: numVal(cleanCell(ws, r, colSelf)),
+      supScore: numVal(cleanCell(ws, r, colSup)),
+      score: numVal(cleanCell(ws, r, colRes)),
+    };
+    indicators.push(rec);
+  }
+
+  // 结果分优先级：合计行结果列 > 指标结果分之和 > 上级分
+  let score = resFound ? resTotal : 0;
+  if (!score) score = indicators.reduce((a, b) => a + (Number(b.score) || 0), 0);
+  if (!score) score = supTotal || indicators.reduce((a, b) => a + (Number(b.supScore) || 0), 0);
+  const selfScore = selfTotal || indicators.reduce((a, b) => a + (Number(b.selfScore) || 0), 0);
+  const supScore = supTotal || indicators.reduce((a, b) => a + (Number(b.supScore) || 0), 0);
+  const weightSum = Math.round(indicators.reduce((a, b) => a + (Number(b.weight) || 0), 0) * 100) / 100;
+
+  return {
+    name, post, dept, selfScore, supScore, score: Math.round(score * 100) / 100,
+    indicators, indicatorCount: indicators.length, weightSum,
+  };
+}
+
+// 解析汇总表 sheet -> [{...行}]
+// 注意：表头行不一定在第 1 行（通常上面有标题行），故先定位"表头行"再按列解析。
+function parsePerfSummarySheet(ws) {
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+  const HDR_KEYS = new Set(Object.keys(PERF_SUM_COLS));
+  // 1) 定位表头行：该行中出现「姓名」且出现「结果分/得分」类列名
+  let headerRow = -1, colMap = {};
+  for (let r = range.s.r; r <= Math.min(range.e.r, 10); r++) {
+    const cells = {};
+    let hasName = false, hasScore = false;
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const v = String(cleanCell(ws, r, c) || '').replace(/\s/g, '');
+      if (!v) continue;
+      const key = PERF_SUM_COLS[v];
+      if (key) {
+        cells[c] = key;
+        if (key === 'name') hasName = true;
+        if (key === 'score') hasScore = true;
+      }
+    }
+    if (hasName && hasScore) { headerRow = r; colMap = cells; break; }
+  }
+  if (headerRow < 0) return [];
+
+  const out = [];
+  for (let r = headerRow + 1; r <= range.e.r; r++) {
+    const o = {};
+    Object.keys(colMap).forEach(c => { o[colMap[c]] = cleanCell(ws, r, Number(c)); });
+    const name = String(o.name || '').trim();
+    if (!name || /^(合计|小计|总计|平均)/.test(name)) continue;
+    const score = Number(o.score);
+    if (!Number.isFinite(score)) continue;
+    out.push({
+      name,
+      dept: String(o.dept || '').trim(),
+      post: String(o.post || '').trim(),
+      selfScore: Number(o.selfScore) || 0,
+      supScore: Number(o.supScore) || 0,
+      score: Math.round(score * 100) / 100,
+      indicators: [], indicatorCount: 0, weightSum: 0,
+    });
+  }
+  return out;
+}
+
+// 解析绩效 Excel（自动识别格式）。返回 { mode, period, rows } 或 { mode, records:[{period,name,...}] }
+async function parsePerformanceExcel(file) {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array', raw: true });
+  // 先探测第一张"有效"表
+  let mode = 'unknown';
+  for (const sn of wb.SheetNames) {
+    const t = detectPerfSheetType(wb.Sheets[sn]);
+    if (t !== 'unknown') { mode = t; break; }
+  }
+  // 兜底：若含多 sheet 且每 sheet 有姓名+考核指标 => 单人表
+  if (mode === 'unknown') {
+    mode = wb.SheetNames.length >= 1 ? 'single' : 'summary';
+  }
+
+  if (mode === 'single') {
+    // 多 sheet：每个 sheet 一个（员工,期间）
+    const records = [];
+    const periods = [];
+    wb.SheetNames.forEach(sn => {
+      const ws = wb.Sheets[sn];
+      const rec = parsePerfSingleSheet(ws);
+      if (!rec) return;
+      const period = periodFromSheetName(sn, ws);
+      if (period) periods.push(period);
+      records.push({ ...rec, period });
+    });
+    // 若所有 sheet 均为同一员工且期间可识别，则是"单人多月表"
+    const uniqNames = [...new Set(records.map(r => r.name))];
+    const single = uniqNames.length === 1;
+    return { mode: 'single', single, records, periods: [...new Set(periods)].sort().reverse() };
+  }
+
+  // summary：单期间多行
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const period = periodFromSheetName(wb.SheetNames[0], ws);
+  const rows = parsePerfSummarySheet(ws);
+  return { mode: 'summary', period, rows };
+}
+
+// 手动选择期间
+function askPerfPeriod() {
+  const now = new Date();
+  const y = prompt('未能在绩效表中识别到期间，请输入年份（如 2025）：', String(now.getFullYear()));
+  if (!y) return null;
+  const mo = prompt('请输入月份（1-12）：', String(now.getMonth() + 1));
+  if (!mo) return null;
+  const Y = Number(y), M = Number(mo);
+  if (!Y || !M || M < 1 || M > 12) { alert('年份或月份无效'); return null; }
+  return Y + '-' + String(M).padStart(2, '0');
+}
+
+// 导入绩效表主流程
+async function handlePerfImport(e) {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  try {
+    const parsed = await parsePerformanceExcel(file);
+    let payload; // 待提交记录（已含 period/grade 由后端补）
+    if (parsed.mode === 'single') {
+      if (!parsed.records.length) { alert('未能从该文件中解析出绩效记录（需含「姓名」「考核指标」等结构）'); e.target.value = ''; return; }
+      // 期间缺失则询问
+      let missing = parsed.records.filter(r => !r.period);
+      let fallback = '';
+      if (missing.length) {
+        fallback = askPerfPeriod();
+        if (!fallback) { e.target.value = ''; return; }
+      }
+      payload = parsed.records.map(r => ({ ...r, period: r.period || fallback }));
+      // 过滤「未填写」的空表：结果分为 0 且无任何指标得分 → 视为尚未考核
+      const filled = payload.filter(r => Number(r.score) > 0 || (r.indicators || []).some(it => Number(it.score) > 0));
+      const blank = payload.length - filled.length;
+      if (!filled.length) {
+        alert('该文件中的考核表尚未填写得分（结果分为 0），暂无可导入的数据。\n请先完成打分后再导入。');
+        e.target.value = ''; return;
+      }
+      if (blank) alert('已跳过 ' + blank + ' 张尚未填写得分的考核表（结果分为 0）。');
+      payload = filled;
+    } else {
+      if (!parsed.rows.length) { alert('未能从该文件中解析出有效的绩效记录（需含「姓名」「结果分/得分」等列）'); e.target.value = ''; return; }
+      let period = parsed.period;
+      if (!period) { period = askPerfPeriod(); if (!period) { e.target.value = ''; return; } }
+      payload = parsed.rows.map(r => ({ ...r, period }));
+    }
+
+    // 期间覆盖提示
+    const periodsToImport = [...new Set(payload.map(r => r.period))];
+    const existOverlaps = periodsToImport.filter(p => PERFORMANCE.some(x => x.period === p));
+    if (existOverlaps.length) {
+      const txt = existOverlaps.map(p => fmtPeriod(p)).join('、');
+      if (!confirm('期间 ' + txt + ' 已有绩效数据，导入将覆盖这些期间的旧数据，是否继续？')) { e.target.value = ''; return; }
+    }
+
+    const res = await apiJson('/performance/import', { records: payload }, 'POST');
+    let msg = '成功导入 ' + res.inserted + ' 条绩效记录（覆盖 ' + periodsToImport.length + ' 个期间）';
+    if (res.removed) msg += '\n覆盖旧记录 ' + res.removed + ' 条';
+    if (res.linked) msg += '\n已同步更新员工绩效等级 ' + res.linked + ' 人';
+    if (res.unmatched) msg += '\n' + res.unmatched + ' 人在花名册未匹配到';
+    if (res.ambiguous) msg += '\n' + res.ambiguous + ' 人因重名被跳过';
+    alert(msg);
+    e.target.value = '';
+    // 切到导入的第一个期间并刷新
+    PERFORMANCE_PERIOD = periodsToImport.sort().reverse()[0];
+    await reloadPerfData();
+  } catch (err) {
+    alert('导入失败：' + err.message);
+    e.target.value = '';
+  }
+}
+
+// 导出绩效明细（本期间）
+function exportPerformanceExcel() {
+  const rows = PERFORMANCE.filter(p => p.period === PERFORMANCE_PERIOD).map(r => ({
+    '期间': r.period, '姓名': r.name, '部门': r.dept, '岗位': r.post,
+    '自评': r.selfScore, '上级': r.supScore, '结果分': r.score, '等级': r.grade, '指标数': r.indicatorCount || 0,
+  }));
+  if (!rows.length) { alert('当前期间无绩效数据可导出'); return; }
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '绩效明细');
+  XLSX.writeFile(wb, `绩效明细_${PERFORMANCE_PERIOD || ''}_${new Date().toISOString().slice(0, 10)}.xlsx`);
 }
 
 async function apiJson(path, body, method) {
@@ -2425,10 +3018,11 @@ const renderers = {
   overview: renderOverview,
   personnel: renderPersonnel,
   salary: renderSalary,
+  performance: renderPerformance,
   tasks: renderTasks,
   employees: renderEmployees,
 };
-const rendered = { overview: false, personnel: false, salary: false, tasks: false, employees: false };
+const rendered = { overview: false, personnel: false, salary: false, performance: false, tasks: false, employees: false };
 
 async function switchView(view) {
   currentView = view;
@@ -2441,6 +3035,7 @@ async function switchView(view) {
     overview: ['数据总览', '全公司人力资源核心指标概览'],
     personnel: ['人员看板', '员工结构、流动与分布分析'],
     salary: ['薪酬驾驶舱', '成本构成、部门对比、实发与税负分析'],
+    performance: ['绩效驾驶舱', '绩效等级分布、部门对比、趋势与指标明细'],
     tasks: ['任务进度看板', '重点工作进度与交付追踪'],
     employees: ['员工明细', '员工搜索、筛选、排序与导出'],
   };
@@ -2456,6 +3051,10 @@ async function switchView(view) {
     initSalaryControls();
     await renderSalary();
     rendered.salary = true;
+  } else if (view === 'performance') {
+    initPerfControls();
+    await renderPerformance();
+    rendered.performance = true;
   } else if (!rendered[view]) {
     renderers[view]();
     rendered[view] = true;
