@@ -70,16 +70,16 @@ function ensureStore() {
     fs.writeFileSync(TASK_FILE, JSON.stringify(resolveTaskDates(seed), null, 2));
     console.log(`[HR] 已用种子数据初始化：${seed.length} 条任务`);
   }
-  // 薪酬为演示数据：每次启动都强制用种子数据重建，保证驾驶舱始终有可看的数据。
-  // 生产接入真实薪酬库后可移除 forcePayrollSeed=true。
-  if (process.env.FORCE_PAYROLL_SEED !== 'false') {
+  // 薪酬持久化策略：默认「仅当文件缺失或为空时才播种演示数据」，之后用户在界面导入的真实工资数据长期保留。
+  // 只有在显式设置 FORCE_PAYROLL_SEED=true（字符串）时才每次启动强制重建为种子数据（仅演示/调试用）。
+  if (process.env.FORCE_PAYROLL_SEED === 'true') {
     const seed = fs.existsSync(PAYROLL_SEED_FILE) ? JSON.parse(fs.readFileSync(PAYROLL_SEED_FILE, 'utf8')) : [];
     fs.writeFileSync(PAYROLL_FILE, JSON.stringify(seed, null, 2));
-    console.log(`[HR] 薪酬演示数据已重置：${seed.length} 条工资记录`);
+    console.log(`[HR] 薪酬演示数据已强制重建：${seed.length} 条工资记录`);
   } else if (isEmptyJsonArray(PAYROLL_FILE)) {
     const seed = fs.existsSync(PAYROLL_SEED_FILE) ? JSON.parse(fs.readFileSync(PAYROLL_SEED_FILE, 'utf8')) : [];
     fs.writeFileSync(PAYROLL_FILE, JSON.stringify(seed, null, 2));
-    console.log(`[HR] 已用种子数据初始化：${seed.length} 条工资记录`);
+    console.log(`[HR] 薪酬无数据，已用种子初始化：${seed.length} 条工资记录`);
   }
 }
 
@@ -159,18 +159,89 @@ function makeCrud(basePath, file, idPrefix, numericFields = []) {
   });
 }
 
-// 员工（保留原有接口路径不变）
-makeCrud('/api/employees', DB_FILE, 'E', ['salary', 'age', 'tenure']);
-// 任务（新增）
-makeCrud('/api/tasks', TASK_FILE, 'T', ['progress', 'hours']);
-// 工资表（薪酬驾驶舱，行级明细，对齐"2026年8月工资表"模板列）
-makeCrud('/api/payroll', PAYROLL_FILE, 'PR', [
+// 工资表数值字段白名单（与"2026年8月工资表"模板 33 列对齐；CRUD 归一与 /api/payroll/import 共用）
+const PAYROLL_NUM_FIELDS = [
   'basic', 'secrecy', 'perf', 'postAllowance', 'otherAllowance', 'gross',
   'lateDeduct', 'sickDeduct', 'affairDeduct', 'otherDeduct', 'deductTotal', 'payable',
   'pension', 'medical', 'unemploy', 'housingFund', 'socialTotal',
   'childEdu', 'continueEdu', 'interest', 'rent', 'infantCare', 'parentCare', 'specialDeductTotal',
   'taxableThis', 'taxableCum', 'taxThis', 'taxCum', 'taxPaid', 'netPay',
-]);
+];
+
+// 员工（保留原有接口路径不变）；salary=月薪(应发)，salaryNet=实发工资
+makeCrud('/api/employees', DB_FILE, 'E', ['salary', 'salaryNet', 'age', 'tenure']);
+// 任务（新增）
+makeCrud('/api/tasks', TASK_FILE, 'T', ['progress', 'hours']);
+// 工资表（薪酬驾驶舱，行级明细，对齐"2026年8月工资表"模板列）
+makeCrud('/api/payroll', PAYROLL_FILE, 'PR', PAYROLL_NUM_FIELDS);
+
+// ============================================================
+//  薪酬批量导入（按期间覆盖 + 联动更新员工花名册 salary）
+//  用户在薪酬驾驶舱上传工资表 Excel 后由前端解析成 rows，再调用本接口落库。
+//  - 按 period 删除该期间的旧记录再合并新记录，不影响其它月份
+//  - 依「部门 + 姓名」匹配员工（在职优先）更新其 salary（默认取 payable/应付）
+// ============================================================
+function readJson(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return []; } }
+function writeJson(file, list) { fs.writeFileSync(file, JSON.stringify(list, null, 2)); }
+
+// 联动：把本次导入的某期间薪酬行，按「部门+姓名」匹配员工并更新 salary
+// 返回 { linked, unmatched, ambiguous }（任一行匹配不上都不阻断导入，仅统计）
+function linkSalaryToEmployees(payrollRows) {
+  const employees = readJson(DB_FILE);
+  let linked = 0, unmatched = 0, ambiguous = 0;
+  const isActive = e => e.status !== '离职';
+  payrollRows.forEach(r => {
+    const nm = String(r.name || '').trim(), dp = String(r.dept || '').trim();
+    if (!nm) return;
+    // 候选 1：部门+姓名都匹配、且在册（在职/试用）
+    let cands = employees.filter(e => e.name === nm && String(e.dept || '').trim() === dp && isActive(e));
+    if (!cands.length) cands = employees.filter(e => e.name === nm && isActive(e)); // 退化：仅按姓名
+    if (!cands.length) { unmatched++; return; }
+    // 多候选人：优先"在职"
+    if (cands.length > 1) {
+      const inService = cands.filter(e => e.status === '在职');
+      if (inService.length) cands = inService;
+    }
+    if (cands.length !== 1) { ambiguous++; return; } // 仍无法唯一确定 → 跳过，防误覆盖
+    // 联动花名册薪资：salary=月薪(取应付 payable)；salaryNet=实发工资(取 netPay)
+    cands[0].salary = Math.round((Number(r.payable) || 0) * 100) / 100;
+    cands[0].salaryNet = Math.round((Number(r.netPay) || 0) * 100) / 100;
+    linked++;
+  });
+  if (linked) writeJson(DB_FILE, employees);
+  return { linked, unmatched, ambiguous };
+}
+
+// 导入某期间工资数据：body = { period: 'YYYY-MM', rows: [{ dept, name, 各数值字段 }] }
+app.post('/api/payroll/import', (req, res) => {
+  const b = req.body || {};
+  const period = String(b.period || '').trim();
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(period)) return res.status(400).json({ error: '期间格式应为 YYYY-MM，如 2026-08' });
+  const rawRows = Array.isArray(b.rows) ? b.rows : [];
+  if (!rawRows.length) return res.status(400).json({ error: 'rows 不能为空' });
+
+  let list = readJson(PAYROLL_FILE);
+  const removed = list.filter(p => p.period === period).length;
+  list = list.filter(p => p.period !== period);
+
+  // 归一 + 生成稳定 id / seq
+  const stamp = period.replace(/-/g, ''); // 2026-08 -> 202608
+  const now = new Date().toISOString();
+  const newRows = rawRows.map((r, i) => {
+    const o = { ...r, period, seq: i + 1 };
+    PAYROLL_NUM_FIELDS.forEach(f => { o[f] = Math.round((Number(o[f]) || 0) * 100) / 100; });
+    o.dept = String(o.dept || '').trim();
+    o.name = String(o.name || '').trim();
+    o.id = 'PR' + stamp + String(i + 1).padStart(4, '0');
+    o.updatedAt = now;
+    return o;
+  }).filter(r => r.name); // 剔除无姓名行
+
+  const link = linkSalaryToEmployees(newRows);
+  list = list.concat(newRows);
+  writeJson(PAYROLL_FILE, list);
+  res.json({ ok: true, inserted: newRows.length, removed, linked: link.linked, unmatched: link.unmatched, ambiguous: link.ambiguous, total: list.length });
+});
 
 // ============================================================
 //  AI（大语言模型）接口
