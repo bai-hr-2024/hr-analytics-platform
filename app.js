@@ -275,6 +275,7 @@ function renderPersonnel() {
 // 二者相互独立：驾驶舱不依赖 AGG/员工明细，单独读 payroll 数据集。
 let PAYROLL = [];            // 后端 /api/payroll 全量
 let PAYROLL_PERIOD = '2026-08';   // 当前展示月份
+let PAYROLL_PERIODS = [];    // 已入库的全部期间（desc）
 let payrollInited = false;
 
 async function loadPayroll() {
@@ -286,12 +287,42 @@ async function loadPayroll() {
     return [];
   }
 }
+
+// 用 PAYROLL 重算期间列表并重建下拉
+function refreshPeriodsFromData() {
+  PAYROLL_PERIODS = [...new Set(PAYROLL.map(p => p.period))].filter(Boolean).sort().reverse();
+  rebuildPeriodSel();
+}
+
 async function ensurePayrollLoaded() {
   if (payrollInited) return;
   PAYROLL = await loadPayroll();
-  const periods = [...new Set(PAYROLL.map(p => p.period))];
-  if (periods.length) PAYROLL_PERIOD = periods[0];
+  refreshPeriodsFromData();
+  if (PAYROLL_PERIODS.length) {
+    // 若当前 PAYROLL_PERIOD 已在库里则沿用，否则取最新期间
+    if (!PAYROLL_PERIODS.includes(PAYROLL_PERIOD)) PAYROLL_PERIOD = PAYROLL_PERIODS[0];
+  }
   payrollInited = true;
+}
+
+// 重建期间下拉（显示为 "2026年8月"）
+function rebuildPeriodSel() {
+  const sel = document.getElementById('saPeriodSel');
+  if (!sel) return;
+  sel.innerHTML = '';
+  if (!PAYROLL_PERIODS.length) {
+    const o = document.createElement('option');
+    o.value = ''; o.textContent = '暂无期间';
+    sel.appendChild(o);
+    return;
+  }
+  PAYROLL_PERIODS.forEach(p => {
+    const o = document.createElement('option');
+    o.value = p;
+    o.textContent = p.replace('-', '年') + '月';
+    sel.appendChild(o);
+  });
+  sel.value = PAYROLL_PERIODS.includes(PAYROLL_PERIOD) ? PAYROLL_PERIOD : PAYROLL_PERIODS[0];
 }
 
 // 对 payroll 行计算驾驶舱聚合（仿 computeAggregates，纯函数）
@@ -381,7 +412,10 @@ async function renderSalary() {
     { label: '社保+个税负担', value: yuan(A.burden), delta: '', dir: 'up', icon: '🧾' },
     { label: '发放人数', value: A.count, delta: '', dir: 'up', icon: '👥' },
   ]);
-  document.getElementById('saPeriod').textContent = PAYROLL_PERIOD;
+  // 同步顶部期间显示与下拉选中
+  const sel = document.getElementById('saPeriodSel');
+  if (sel && PAYROLL_PERIODS.includes(PAYROLL_PERIOD)) sel.value = PAYROLL_PERIOD;
+  document.getElementById('saPeriod').textContent = PAYROLL_PERIOD.replace('-', '年') + '月';
 
   // 1) 部门薪酬成本构成（堆叠条：基本/绩效/津贴补助）
   const deptAsc = A.dept.slice().reverse();
@@ -468,6 +502,32 @@ async function renderSalary() {
 
 // 若后端数据变化，强制重绘（删除渲染缓存）
 function refreshSalary() { delete rendered.salary; return renderSalary(); }
+
+// 从后端重拉薪酬全量、重建期间下拉并重渲染当前期间（用于导入成功后刷新）
+async function reloadSalaryData() {
+  PAYROLL = await loadPayroll();
+  refreshPeriodsFromData();
+  if (PAYROLL_PERIODS.length && !PAYROLL_PERIODS.includes(PAYROLL_PERIOD)) PAYROLL_PERIOD = PAYROLL_PERIODS[0];
+  delete rendered.salary;
+  await renderSalary();
+}
+
+// 一次性绑定薪酬驾驶舱顶部的期间下拉 + 导入按钮（守卫防重复）
+let saControlsInited = false;
+function initSalaryControls() {
+  if (saControlsInited) return;
+  saControlsInited = true;
+  const sel = document.getElementById('saPeriodSel');
+  const btn = document.getElementById('btnSalaryImport');
+  const fileInput = document.getElementById('salaryImport');
+  if (sel) sel.addEventListener('change', () => {
+    if (sel.value) { PAYROLL_PERIOD = sel.value; refreshSalary(); }
+  });
+  if (btn && fileInput) {
+    btn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', handleSalaryImport);
+  }
+}
 
 // ---------- 任务进度看板（数据驱动 + AI 分析）----------
 let TASKS = [];
@@ -1979,7 +2039,7 @@ const EMP_COLS = [
   { key: 'id', label: '工号' }, { key: 'name', label: '姓名' }, { key: 'dept', label: '部门' },
   { key: 'level', label: '职级' }, { key: 'gender', label: '性别' }, { key: 'age', label: '年龄' },
   { key: 'edu', label: '学历' }, { key: 'tenure', label: '司龄(年)' }, { key: 'status', label: '状态' },
-  { key: 'salary', label: '月薪(元)' }, { key: 'perf', label: '绩效' }, { key: 'hireDate', label: '入职日期' },
+  { key: 'salary', label: '月薪(元)' }, { key: 'salaryNet', label: '实发工资(元)' }, { key: 'perf', label: '绩效' }, { key: 'hireDate', label: '入职日期' },
 ];
 
 let empState = { data: [], filtered: [], page: 1, pageSize: 10, sortKey: 'id', sortDir: 1 };
@@ -2006,7 +2066,7 @@ function empRenderTable() {
   const sorted = empState.filtered.slice().sort((a, b) => {
     let va = a[empState.sortKey], vb = b[empState.sortKey];
     if (typeof va === 'string') { const c = va.localeCompare(vb, 'zh'); return empState.sortDir * (c > 0 ? 1 : c < 0 ? -1 : 0); }
-    return empState.sortDir * (va - vb);
+    return empState.sortDir * ((Number(va) || 0) - (Number(vb) || 0));
   });
 
   const totalPages = Math.max(1, Math.ceil(sorted.length / empState.pageSize));
@@ -2021,7 +2081,7 @@ function empRenderTable() {
     <td>${e.id}</td><td>${e.name}</td><td>${e.dept}</td><td>${e.level}</td>
     <td>${e.gender}</td><td>${e.age}</td><td>${e.edu}</td><td>${e.tenure}</td>
     <td><span class="tag tag-${e.status}">${e.status}</span></td>
-    <td>${e.salary.toLocaleString()}</td><td>${e.perf}</td><td>${e.hireDate}</td>
+    <td>${(e.salary || 0).toLocaleString()}</td><td>${(e.salaryNet || 0).toLocaleString()}</td><td>${e.perf}</td><td>${e.hireDate}</td>
     <td><button class="row-btn" data-edit="${e.id}">编辑</button><button class="row-btn danger" data-del="${e.id}">删除</button></td></tr>`).join('') + '</tbody>';
   t.innerHTML = head + body;
 
@@ -2102,7 +2162,8 @@ function openEmpModal(emp) {
   document.getElementById('f_edu').value = emp ? emp.edu : '本科';
   document.getElementById('f_tenure').value = emp ? emp.tenure : '';
   document.getElementById('f_status').value = emp ? emp.status : '在职';
-  document.getElementById('f_salary').value = emp ? emp.salary : '';
+  document.getElementById('f_salary').value = emp ? (emp.salary ?? '') : '';
+  document.getElementById('f_salaryNet').value = emp ? (emp.salaryNet ?? '') : '';
   document.getElementById('f_perf').value = emp ? emp.perf : 'B';
   document.getElementById('f_hireDate').value = emp ? emp.hireDate : '';
   m.classList.add('open');
@@ -2121,6 +2182,7 @@ function collectEmpForm() {
     tenure: Number(document.getElementById('f_tenure').value) || 0,
     status: document.getElementById('f_status').value,
     salary: Number(document.getElementById('f_salary').value) || 0,
+    salaryNet: Number(document.getElementById('f_salaryNet').value) || 0,
     perf: document.getElementById('f_perf').value,
     hireDate: document.getElementById('f_hireDate').value || new Date().toISOString().slice(0, 10),
   };
@@ -2162,7 +2224,8 @@ async function deleteEmp(id) {
 const HEADER_MAP = {
   '工号': 'id', '编号': 'id', '姓名': 'name', '名字': 'name', '名称': 'name', '部门': 'dept', '职级': 'level',
   '性别': 'gender', '年龄': 'age', '学历': 'edu', '司龄': 'tenure', '司龄(年)': 'tenure', '工龄': 'tenure',
-  '状态': 'status', '月薪': 'salary', '薪资': 'salary', '工资': 'salary', '绩效': 'perf',
+  '状态': 'status', '月薪': 'salary', '薪资': 'salary', '工资': 'salary', '月薪(元)': 'salary', '绩效': 'perf',
+  '实发': 'salaryNet', '实发工资': 'salaryNet', '实发工资(元)': 'salaryNet',
   '入职日期': 'hireDate', '入职时间': 'hireDate', '入职': 'hireDate',
 };
 
@@ -2200,6 +2263,7 @@ async function importEmployees(e) {
         tenure: Number(o.tenure) || 0,
         status: o.status || '在职',
         salary: Number(o.salary) || 0,
+        salaryNet: Number(o.salaryNet) || 0,
         perf: String(o.perf || 'B').trim(),
         hireDate: excelDateToStr(o.hireDate),
       };
@@ -2211,6 +2275,102 @@ async function importEmployees(e) {
     afterMutation();
   } catch (err) {
     alert('导入失败：' + err.message);
+  }
+}
+
+// ============================================================
+//  薪酬工资表 Excel 解析（针对"双层表头"工资表模板）
+//  模板结构：第1行合并标题「YYYY年M月工资表」；第2行大栏目；第3行子字段名；第4行起数据。
+//  不依赖列名文本，而用「列位置映射」逐行读取，天然兼容列名细节变化。
+// ============================================================
+// 列位置(0-based) -> payroll 字段名（对齐后端 PAYROLL_NUM_FIELDS）
+const SALARY_NUM_COLS = {
+  3: 'basic', 4: 'secrecy', 5: 'perf', 6: 'postAllowance', 7: 'otherAllowance', 8: 'gross',
+  9: 'lateDeduct', 10: 'sickDeduct', 11: 'affairDeduct', 12: 'otherDeduct', 13: 'deductTotal', 14: 'payable',
+  15: 'pension', 16: 'medical', 17: 'unemploy', 18: 'housingFund', 19: 'socialTotal',
+  20: 'childEdu', 21: 'continueEdu', 22: 'interest', 23: 'rent', 24: 'infantCare', 25: 'parentCare', 26: 'specialDeductTotal',
+  27: 'taxableThis', 28: 'taxableCum', 29: 'taxThis', 30: 'taxCum', 31: 'taxPaid', 32: 'netPay',
+};
+const SALARY_DIRTY_NAMES = new Set(['合计', '小计', '总计', '制表人', '审核人', '复核人', '审批人', '单位', '备注', '合计（人民币元）']);
+function cleanCell(ws, r, c) {
+  const cell = ws[XLSX.utils.encode_cell({ r, c })];
+  if (cell === undefined || cell.v === undefined || cell.v === null) return '';
+  if (cell.t === 'n') return cell.v;            // 数字原样返回
+  return String(cell.v).trim();
+}
+function numVal(v) { const n = Number(v); return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0; }
+
+// 解析工资表 Excel，返回 { period: 'YYYY-MM'|null, rows: [...] }
+async function parsePayrollExcel(file) {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array', raw: true });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+  // 1) 标题行(第1行,0-based r0)解析期间
+  const title = cleanCell(ws, 0, 0);
+  const m = String(title).match(/(\d{4})\s*年\s*(\d{1,2})\s*月/);
+  let period = null;
+  if (m) period = m[1] + '-' + String(Number(m[2])).padStart(2, '0');
+
+  // 2) 数据从第4行(0-based r3)起；剔除合计/页脚/空行
+  const rows = [];
+  for (let r = 3; r <= range.e.r; r++) {
+    const name = cleanCell(ws, r, 2);   // C 姓名
+    const dept = cleanCell(ws, r, 1);   // B 部门
+    if (!name) continue;                // 空行
+    const nm = String(name).replace(/[\s\n\u3000]/g, '');
+    // 合计/页脚等杂质行：姓名本身是合计类文本，或姓名是"制表人："前缀
+    if (SALARY_DIRTY_NAMES.has(nm) || /^(制表|审核|复核|审批)/.test(nm) || nm.includes('制表人')) continue;
+    const row = { seq: rows.length + 1, dept, name: nm };
+    Object.keys(SALARY_NUM_COLS).forEach(c => { row[SALARY_NUM_COLS[c]] = numVal(cleanCell(ws, r, Number(c))); });
+    rows.push(row);
+  }
+  return { period, rows };
+}
+
+// 手动选择月份（标题无法识别时），返回 'YYYY-MM' 或 null
+function askPayrollPeriod() {
+  const now = new Date();
+  const y = prompt('未能在工资表标题中识别到月份，请输入年份（如 2026）：', String(now.getFullYear()));
+  if (!y) return null;
+  const mo = prompt('请输入月份（1-12）：', String(now.getMonth() + 1));
+  if (!mo) return null;
+  const Y = Number(y), M = Number(mo);
+  if (!Y || !M || M < 1 || M > 12) { alert('年份或月份无效'); return null; }
+  return Y + '-' + String(M).padStart(2, '0');
+}
+
+// 导入工资表后的主流程：解析 -> 确认期间/覆盖 -> POST /payroll/import -> 刷新
+async function handleSalaryImport(e) {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  try {
+    const { period: autoPeriod, rows } = await parsePayrollExcel(file);
+    if (!rows.length) { alert('未能从该文件中解析出有效的工资记录（需包含“姓名”“部门”等列）'); e.target.value = ''; return; }
+    let period = autoPeriod;
+    if (!period) {
+      period = askPayrollPeriod();
+      if (!period) { e.target.value = ''; return; }
+    }
+    // 若该期间已有数据，提示覆盖（按期间替换，不影响其它月份）
+    if (PAYROLL_PERIODS.includes(period) && PAYROLL.some(p => p.period === period)) {
+      if (!confirm('期间 ' + period.replace('-', '年') + '月 已有 ' + PAYROLL.filter(p => p.period === period).length + ' 条记录，导入将覆盖该期间的旧数据，是否继续？')) { e.target.value = ''; return; }
+    }
+    const res = await apiJson('/payroll/import', { period, rows }, 'POST');
+    // 弹提示
+    let msg = '成功导入 ' + period.replace('-', '年') + '月 工资表：' + res.inserted + ' 条记录';
+    if (res.removed) msg += '（覆盖旧 ' + res.removed + ' 条）';
+    if (res.linked) msg += '\n已同步更新员工花名册月薪 ' + res.linked + ' 人';
+    if (res.unmatched) msg += '\n' + res.unmatched + ' 人在花名册未匹配到（可在员工明细中手动核对）';
+    if (res.ambiguous) msg += '\n' + res.ambiguous + ' 人因重名无法确定被跳过';
+    alert(msg);
+    e.target.value = '';
+    // 刷新数据并切到该期间（保持停留在薪酬驾驶舱）
+    PAYROLL_PERIOD = period;
+    await reloadSalaryData();
+  } catch (err) {
+    alert('导入失败：' + err.message);
+    e.target.value = '';
   }
 }
 
@@ -2228,7 +2388,7 @@ function exportEmployeesExcel() {
   const rows = empState.filtered.map(e => ({
     '工号': e.id, '姓名': e.name, '部门': e.dept, '职级': e.level, '性别': e.gender,
     '年龄': e.age, '学历': e.edu, '司龄(年)': e.tenure, '状态': e.status,
-    '月薪(元)': e.salary, '绩效': e.perf, '入职日期': e.hireDate,
+    '月薪(元)': e.salary, '实发工资(元)': e.salaryNet || 0, '绩效': e.perf, '入职日期': e.hireDate,
   }));
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();
@@ -2293,6 +2453,7 @@ async function switchView(view) {
     renderTasks();
     rendered.tasks = true;
   } else if (view === 'salary') {
+    initSalaryControls();
     await renderSalary();
     rendered.salary = true;
   } else if (!rendered[view]) {
