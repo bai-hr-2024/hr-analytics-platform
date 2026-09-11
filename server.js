@@ -14,9 +14,11 @@ const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : pat
 const DB_FILE = path.join(DATA_DIR, 'employees.json');
 const TASK_FILE = path.join(DATA_DIR, 'tasks.json');
 const PAYROLL_FILE = path.join(DATA_DIR, 'payroll.json');
+const PERFORMANCE_FILE = path.join(DATA_DIR, 'performance.json');
 const SEED_FILE = path.join(__dirname, 'seed.json');
 const TASK_SEED_FILE = path.join(__dirname, 'taskSeed.json');
 const PAYROLL_SEED_FILE = path.join(__dirname, 'payrollSeed.json');
+const PERFORMANCE_SEED_FILE = path.join(__dirname, 'performanceSeed.json');
 const AI_CONFIG_FILE = path.join(DATA_DIR, 'ai-config.json');
 
 // 默认 LLM 配置（OpenAI 兼容协议，覆盖国内外主流厂商）
@@ -80,6 +82,16 @@ function ensureStore() {
     const seed = fs.existsSync(PAYROLL_SEED_FILE) ? JSON.parse(fs.readFileSync(PAYROLL_SEED_FILE, 'utf8')) : [];
     fs.writeFileSync(PAYROLL_FILE, JSON.stringify(seed, null, 2));
     console.log(`[HR] 薪酬无数据，已用种子初始化：${seed.length} 条工资记录`);
+  }
+  // 绩效持久化策略：与薪酬一致——文件缺失/为空时播种演示数据，之后用户导入的真实绩效数据长期保留。
+  if (process.env.FORCE_PERFORMANCE_SEED === 'true') {
+    const seed = fs.existsSync(PERFORMANCE_SEED_FILE) ? JSON.parse(fs.readFileSync(PERFORMANCE_SEED_FILE, 'utf8')) : [];
+    fs.writeFileSync(PERFORMANCE_FILE, JSON.stringify(seed, null, 2));
+    console.log(`[HR] 绩效演示数据已强制重建：${seed.length} 条绩效记录`);
+  } else if (isEmptyJsonArray(PERFORMANCE_FILE)) {
+    const seed = fs.existsSync(PERFORMANCE_SEED_FILE) ? JSON.parse(fs.readFileSync(PERFORMANCE_SEED_FILE, 'utf8')) : [];
+    fs.writeFileSync(PERFORMANCE_FILE, JSON.stringify(seed, null, 2));
+    console.log(`[HR] 绩效无数据，已用种子初始化：${seed.length} 条绩效记录`);
   }
 }
 
@@ -168,12 +180,30 @@ const PAYROLL_NUM_FIELDS = [
   'taxableThis', 'taxableCum', 'taxThis', 'taxCum', 'taxPaid', 'netPay',
 ];
 
+// 绩效数值字段白名单（indicators 为嵌套数组，不在此列 → 原样保存，避免被归一清零）
+const PERFORMANCE_NUM_FIELDS = ['selfScore', 'supScore', 'score', 'indicatorCount', 'weightSum'];
+
+// 绩效等级按分数自动换算（与前端 GRADE_RULES 保持一致）
+const PERF_GRADE_RULES = [
+  { min: 90, grade: '优秀' }, { min: 80, grade: '良好' },
+  { min: 70, grade: '合格' }, { min: -Infinity, grade: '待改进' },
+];
+function gradeOf(score, rules = PERF_GRADE_RULES) {
+  const s = Number(score);
+  if (!Number.isFinite(s)) return '';
+  return (rules.find(r => s >= r.min) || rules[rules.length - 1]).grade;
+}
+// 绩效等级(优秀/良好/合格/待改进) -> 员工花名册 perf 字段(S/A/B/C)
+const PERF_GRADE_MAP = { '优秀': 'S', '良好': 'A', '合格': 'B', '待改进': 'C' };
+
 // 员工（保留原有接口路径不变）；salary=月薪(应发)，salaryNet=实发工资
 makeCrud('/api/employees', DB_FILE, 'E', ['salary', 'salaryNet', 'age', 'tenure']);
 // 任务（新增）
 makeCrud('/api/tasks', TASK_FILE, 'T', ['progress', 'hours']);
 // 工资表（薪酬驾驶舱，行级明细，对齐"2026年8月工资表"模板列）
 makeCrud('/api/payroll', PAYROLL_FILE, 'PR', PAYROLL_NUM_FIELDS);
+// 绩效（绩效驾驶舱，行级明细，含嵌套 indicators 指标明细）
+makeCrud('/api/performance', PERFORMANCE_FILE, 'PF', PERFORMANCE_NUM_FIELDS);
 
 // ============================================================
 //  薪酬批量导入（按期间覆盖 + 联动更新员工花名册 salary）
@@ -241,6 +271,88 @@ app.post('/api/payroll/import', (req, res) => {
   list = list.concat(newRows);
   writeJson(PAYROLL_FILE, list);
   res.json({ ok: true, inserted: newRows.length, removed, linked: link.linked, unmatched: link.unmatched, ambiguous: link.ambiguous, total: list.length });
+});
+
+// ============================================================
+//  绩效批量导入（按期间覆盖 + 联动更新员工花名册 perf 等级）
+//  前端上传绩效 Excel（单人多月表 / 多人汇总表）解析成 rows 后调用本接口落库。
+// ============================================================
+// 联动：把本次导入员工的绩效等级回写花名册 perf 字段（S/A/B/C）
+function linkPerformanceToEmployees(perfRows) {
+  const employees = readJson(DB_FILE);
+  let linked = 0, unmatched = 0, ambiguous = 0;
+  const isActive = e => e.status !== '离职';
+  perfRows.forEach(r => {
+    const nm = String(r.name || '').trim(), dp = String(r.dept || '').trim();
+    if (!nm) return;
+    let cands = employees.filter(e => e.name === nm && String(e.dept || '').trim() === dp && isActive(e));
+    if (!cands.length) cands = employees.filter(e => e.name === nm && isActive(e));
+    if (!cands.length) { unmatched++; return; }
+    if (cands.length > 1) {
+      const inService = cands.filter(e => e.status === '在职');
+      if (inService.length) cands = inService;
+    }
+    if (cands.length !== 1) { ambiguous++; return; }
+    const g = PERF_GRADE_MAP[r.grade];
+    if (g) { cands[0].perf = g; linked++; }
+  });
+  if (linked) writeJson(DB_FILE, employees);
+  return { linked, unmatched, ambiguous };
+}
+
+// 导入绩效数据。支持两种 body：
+//  1) 多期间（前端单人多月表）：{ records: [{ period, name, dept, post, score, grade, indicators[] }] }
+//  2) 单期间（前端多人汇总表/兼容旧调用）：{ period: 'YYYY-MM', rows: [ ... ] }
+// 同期间覆盖：删除该期间旧记录再合并，不影响其它期间。
+app.post('/api/performance/import', (req, res) => {
+  const b = req.body || {};
+  const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+  // 归一成 [{ period, ...record }]
+  let incoming;
+  if (Array.isArray(b.records)) {
+    incoming = b.records.map(r => ({ ...r, period: String(r.period || '').trim() }));
+    const bad = incoming.find(r => !PERIOD_RE.test(r.period));
+    if (bad) return res.status(400).json({ error: '部分记录期间格式无效（应为 YYYY-MM）：' + (bad.period || '(空)') });
+  } else {
+    const period = String(b.period || '').trim();
+    if (!PERIOD_RE.test(period)) return res.status(400).json({ error: '期间格式应为 YYYY-MM，如 2025-12' });
+    incoming = (Array.isArray(b.rows) ? b.rows : []).map(r => ({ ...r, period }));
+  }
+  if (!incoming.length) return res.status(400).json({ error: '没有可导入的绩效记录' });
+
+  // 待覆盖的期间集合
+  const periods = [...new Set(incoming.map(r => r.period))];
+  let list = readJson(PERFORMANCE_FILE);
+  const removed = list.filter(p => periods.includes(p.period)).length;
+  list = list.filter(p => !periods.includes(p.period));
+
+  // 归一 + 生成稳定 id（id 含期间戳，避免跨期间冲突）
+  const now = new Date().toISOString();
+  const seqByPeriod = {};
+  const newRows = incoming.map(r => {
+    const period = String(r.period).trim();
+    seqByPeriod[period] = (seqByPeriod[period] || 0) + 1;
+    const i = seqByPeriod[period];
+    const o = { ...r, period, seq: i };
+    PERFORMANCE_NUM_FIELDS.forEach(f => { o[f] = Math.round((Number(o[f]) || 0) * 100) / 100; });
+    const inds = Array.isArray(r.indicators) ? r.indicators : [];   // 嵌套数组原样保留
+    o.indicators = inds;
+    o.indicatorCount = inds.length;
+    o.weightSum = Math.round(inds.reduce((s, x) => s + (Number(x.weight) || 0), 0) * 100) / 100;
+    o.dept = String(o.dept || '').trim();
+    o.name = String(o.name || '').trim();
+    o.grade = o.grade || gradeOf(o.score);                          // 空则按 score 换算
+    o.source = o.source || (inds.length ? 'single' : 'summary');
+    o.id = 'PF' + period.replace(/-/g, '') + String(i).padStart(4, '0');
+    o.updatedAt = now;
+    return o;
+  }).filter(r => r.name);
+
+  const link = linkPerformanceToEmployees(newRows);
+  list = list.concat(newRows);
+  writeJson(PERFORMANCE_FILE, list);
+  res.json({ ok: true, inserted: newRows.length, removed, periods, linked: link.linked, unmatched: link.unmatched, ambiguous: link.ambiguous, total: list.length });
 });
 
 // ============================================================
