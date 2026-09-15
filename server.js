@@ -242,35 +242,51 @@ function linkSalaryToEmployees(payrollRows) {
   return { linked, unmatched, ambiguous };
 }
 
-// 导入某期间工资数据：body = { period: 'YYYY-MM', rows: [{ dept, name, 各数值字段 }] }
+// 导入工资数据。支持两种 body：
+//  1) 多期间（前端一个文件含多个月份）：{ records: [{ period:'YYYY-MM', rows:[...] }] }
+//  2) 单期间（兼容旧调用）：{ period: 'YYYY-MM', rows: [...] }
+// 同期间覆盖：删除该期间旧记录再合并，不影响其它期间。
 app.post('/api/payroll/import', (req, res) => {
   const b = req.body || {};
-  const period = String(b.period || '').trim();
-  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(period)) return res.status(400).json({ error: '期间格式应为 YYYY-MM，如 2026-08' });
-  const rawRows = Array.isArray(b.rows) ? b.rows : [];
-  if (!rawRows.length) return res.status(400).json({ error: 'rows 不能为空' });
+  const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
+  // 归一成 [{ period, rows:[...] }]
+  let groups;
+  if (Array.isArray(b.records)) {
+    groups = b.records.map(g => ({ period: String(g.period || '').trim(), rows: Array.isArray(g.rows) ? g.rows : [] }));
+    const bad = groups.find(g => !PERIOD_RE.test(g.period));
+    if (bad) return res.status(400).json({ error: '部分记录的期间格式无效（应为 YYYY-MM）：' + (bad.period || '(空)') });
+  } else {
+    const period = String(b.period || '').trim();
+    if (!PERIOD_RE.test(period)) return res.status(400).json({ error: '期间格式应为 YYYY-MM，如 2026-08' });
+    groups = [{ period, rows: Array.isArray(b.rows) ? b.rows : [] }];
+  }
+  if (!groups.length || groups.every(g => !g.rows.length)) return res.status(400).json({ error: '没有可导入的工资记录' });
+
+  const periods = groups.map(g => g.period);
   let list = readJson(PAYROLL_FILE);
-  const removed = list.filter(p => p.period === period).length;
-  list = list.filter(p => p.period !== period);
+  const removed = list.filter(p => periods.includes(p.period)).length;
+  list = list.filter(p => !periods.includes(p.period));
 
-  // 归一 + 生成稳定 id / seq
-  const stamp = period.replace(/-/g, ''); // 2026-08 -> 202608
   const now = new Date().toISOString();
-  const newRows = rawRows.map((r, i) => {
-    const o = { ...r, period, seq: i + 1 };
-    PAYROLL_NUM_FIELDS.forEach(f => { o[f] = Math.round((Number(o[f]) || 0) * 100) / 100; });
-    o.dept = String(o.dept || '').trim();
-    o.name = String(o.name || '').trim();
-    o.id = 'PR' + stamp + String(i + 1).padStart(4, '0');
-    o.updatedAt = now;
-    return o;
-  }).filter(r => r.name); // 剔除无姓名行
+  const newRows = [];
+  groups.forEach(g => {
+    const stamp = g.period.replace(/-/g, ''); // 2026-08 -> 202608
+    g.rows.forEach((r, i) => {
+      const o = { ...r, period: g.period, seq: i + 1 };
+      PAYROLL_NUM_FIELDS.forEach(f => { o[f] = Math.round((Number(o[f]) || 0) * 100) / 100; });
+      o.dept = String(o.dept || '').trim();
+      o.name = String(o.name || '').trim();
+      o.id = 'PR' + stamp + String(i + 1).padStart(4, '0');
+      o.updatedAt = now;
+      if (o.name) newRows.push(o);
+    });
+  });
 
   const link = linkSalaryToEmployees(newRows);
   list = list.concat(newRows);
   writeJson(PAYROLL_FILE, list);
-  res.json({ ok: true, inserted: newRows.length, removed, linked: link.linked, unmatched: link.unmatched, ambiguous: link.ambiguous, total: list.length });
+  res.json({ ok: true, inserted: newRows.length, removed, periods, linked: link.linked, unmatched: link.unmatched, ambiguous: link.ambiguous, total: list.length });
 });
 
 // ============================================================

@@ -2571,32 +2571,68 @@ function cleanCell(ws, r, c) {
 }
 function numVal(v) { const n = Number(v); return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0; }
 
-// 解析工资表 Excel，返回 { period: 'YYYY-MM'|null, rows: [...] }
-async function parsePayrollExcel(file) {
-  const buf = await file.arrayBuffer();
-  const wb = XLSX.read(buf, { type: 'array', raw: true });
-  const ws = wb.Sheets[wb.SheetNames[0]];
+// 判断某 sheet 是否为工资表：标题行含「YYYY年M月」且含「工资表」；且不是考勤/汇总辅助表
+function isSalarySheet(ws, sheetName) {
+  const sn = String(sheetName || '');
+  // sheet 名含「汇总/汇总表/合计/考勤」等 → 辅助表，跳过
+  if (/汇总|合计|考勤|出勤|打卡|明细$/.test(sn)) return false;
+  const title = String(cleanCell(ws, 0, 0) || '') + ' ' + String(cleanCell(ws, 0, 1) || '');
+  const m = title.match(/(\d{4})\s*年\s*(\d{1,2})\s*月/);
+  if (!m) return false;
+  if (/考勤|出勤|打卡/.test(title)) return false;
+  return /工资表|工资|薪资/.test(title);
+}
+// 从 sheet 标题解析期间
+function periodFromSalaryTitle(ws) {
+  const title = String(cleanCell(ws, 0, 0) || '') + ' ' + String(cleanCell(ws, 0, 1) || '');
+  const m = title.match(/(\d{4})\s*年\s*(\d{1,2})\s*月/);
+  return m ? (m[1] + '-' + String(Number(m[2])).padStart(2, '0')) : null;
+}
+// 解析单个工资表 sheet 的数据行（从第4行/0-based r3 起，剔除合计/页脚/空行）
+function parseSalarySheetRows(ws) {
   const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-  // 1) 标题行(第1行,0-based r0)解析期间
-  const title = cleanCell(ws, 0, 0);
-  const m = String(title).match(/(\d{4})\s*年\s*(\d{1,2})\s*月/);
-  let period = null;
-  if (m) period = m[1] + '-' + String(Number(m[2])).padStart(2, '0');
-
-  // 2) 数据从第4行(0-based r3)起；剔除合计/页脚/空行
   const rows = [];
   for (let r = 3; r <= range.e.r; r++) {
     const name = cleanCell(ws, r, 2);   // C 姓名
     const dept = cleanCell(ws, r, 1);   // B 部门
     if (!name) continue;                // 空行
     const nm = String(name).replace(/[\s\n\u3000]/g, '');
-    // 合计/页脚等杂质行：姓名本身是合计类文本，或姓名是"制表人："前缀
     if (SALARY_DIRTY_NAMES.has(nm) || /^(制表|审核|复核|审批)/.test(nm) || nm.includes('制表人')) continue;
     const row = { seq: rows.length + 1, dept, name: nm };
     Object.keys(SALARY_NUM_COLS).forEach(c => { row[SALARY_NUM_COLS[c]] = numVal(cleanCell(ws, r, Number(c))); });
     rows.push(row);
   }
-  return { period, rows };
+  return rows;
+}
+
+// 解析工资表 Excel（支持一个文件含多个月份 sheet）。
+// 返回 { multi: true, records: [{ period, rows:[...] }] } 或 { multi: false, period, rows }
+async function parsePayrollExcel(file) {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array', raw: true });
+
+  // 收集所有「工资表」sheet
+  const salarySheets = wb.SheetNames.filter(sn => isSalarySheet(wb.Sheets[sn], sn));
+  if (!salarySheets.length) {
+    // 兜底：无标准标题，退回读第一张 sheet（旧行为）
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    return { multi: false, period: null, rows: parseSalarySheetRows(ws) };
+  }
+
+  const records = [];
+  salarySheets.forEach(sn => {
+    const ws = wb.Sheets[sn];
+    const period = periodFromSalaryTitle(ws);
+    const rows = parseSalarySheetRows(ws);
+    if (!rows.length) return;                       // 空表跳过
+    records.push({ period, sheet: sn, rows });
+  });
+
+  // 若只有一个月份 sheet，保持单期间返回（兼容旧调用）
+  if (records.length === 1) {
+    return { multi: false, period: records[0].period, rows: records[0].rows };
+  }
+  return { multi: true, records };
 }
 
 // 手动选择月份（标题无法识别时），返回 'YYYY-MM' 或 null
@@ -2616,8 +2652,44 @@ async function handleSalaryImport(e) {
   const file = e.target.files && e.target.files[0];
   if (!file) return;
   try {
-    const { period: autoPeriod, rows } = await parsePayrollExcel(file);
-    if (!rows.length) { alert('未能从该文件中解析出有效的工资记录（需包含“姓名”“部门”等列）'); e.target.value = ''; return; }
+    const parsed = await parsePayrollExcel(file);
+
+    // ---- 情况一：一个文件含多个月份（12 个月 sheet 等）----
+    if (parsed.multi) {
+      const records = parsed.records.filter(rc => rc.rows.length);
+      if (!records.length) { alert('未能从该文件中解析出有效的工资记录'); e.target.value = ''; return; }
+      // 缺期间的询问一次，统一补齐
+      let missing = records.filter(rc => !rc.period);
+      let fallback = '';
+      if (missing.length) { fallback = askPayrollPeriod(); if (!fallback) { e.target.value = ''; return; } }
+      records.forEach(rc => { if (!rc.period) rc.period = fallback; });
+
+      const periods = records.map(rc => rc.period);
+      const totalRows = records.reduce((a, rc) => a + rc.rows.length, 0);
+      const overlaps = periods.filter(p => PAYROLL.some(x => x.period === p));
+      let tip = '检测到 ' + records.length + ' 个月份：' + periods.map(fmtPeriod).join('、') +
+        '\n合计 ' + totalRows + ' 条记录。';
+      if (overlaps.length) tip += '\n\n其中 ' + overlaps.map(fmtPeriod).join('、') + ' 已有数据，将被覆盖。';
+      tip += '\n\n确认导入？';
+      if (!confirm(tip)) { e.target.value = ''; return; }
+
+      const res = await apiJson('/payroll/import', { records }, 'POST');
+      let msg = '成功导入 ' + records.length + ' 个月份、共 ' + res.inserted + ' 条记录';
+      if (res.removed) msg += '\n覆盖旧记录 ' + res.removed + ' 条';
+      if (res.linked) msg += '\n已同步更新员工花名册月薪 ' + res.linked + ' 人';
+      if (res.unmatched) msg += '\n' + res.unmatched + ' 人在花名册未匹配到';
+      if (res.ambiguous) msg += '\n' + res.ambiguous + ' 人因重名被跳过';
+      alert(msg);
+      e.target.value = '';
+      // 切到最新月份
+      PAYROLL_PERIOD = periods.slice().sort().reverse()[0];
+      await reloadSalaryData();
+      return;
+    }
+
+    // ---- 情况二：单月份（旧行为）----
+    const { period: autoPeriod, rows } = parsed;
+    if (!rows || !rows.length) { alert('未能从该文件中解析出有效的工资记录（需包含“姓名”“部门”等列）'); e.target.value = ''; return; }
     let period = autoPeriod;
     if (!period) {
       period = askPayrollPeriod();
