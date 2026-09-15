@@ -519,3 +519,29 @@ th.sortable::after { content: ' ⇅'; opacity: .4; font-size: 10px; }
   .kpi-row { grid-template-columns: 1fr; }
   .main { padding: 18px; }
 }
+
+/* ---------- 分段切换按钮（人均 / 中位数 口径切换）---------- */
+.seg-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border, #dfe5ee);
+  border-radius: 7px;
+  overflow: hidden;
+  background: #fff;
+  margin-left: auto;
+}
+.seg-btn {
+  border: 0;
+  background: transparent;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary, #6b7892);
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.seg-btn + .seg-btn { border-left: 1px solid var(--border, #dfe5ee); }
+.seg-btn:hover { background: #f2f5fa; }
+.seg-btn.active {
+  background: #4361ee;
+  color: #fff;
+}

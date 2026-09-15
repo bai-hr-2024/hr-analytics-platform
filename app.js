@@ -331,6 +331,19 @@ function rebuildPeriodSel() {
   sel.value = PAYROLL_PERIODS.includes(PAYROLL_PERIOD) ? PAYROLL_PERIOD : PAYROLL_PERIODS[0];
 }
 
+// ---------- 分位数工具（中位数 P50 / P25 / P75）----------
+// 采用线性插值法（与 Excel QUARTILE.INC 一致）
+function quantile(sortedAsc, q) {
+  const n = sortedAsc.length;
+  if (!n) return 0;
+  if (n === 1) return sortedAsc[0];
+  const pos = (n - 1) * q;
+  const lo = Math.floor(pos), hi = Math.ceil(pos);
+  if (lo === hi) return sortedAsc[lo];
+  return sortedAsc[lo] + (sortedAsc[hi] - sortedAsc[lo]) * (pos - lo);
+}
+function medianOf(arr) { return quantile(arr.slice().sort((x, y) => x - y), 0.5); }
+
 // 对 payroll 行计算驾驶舱聚合（仿 computeAggregates，纯函数）
 function computePayrollAgg(rows) {
   const sum = (k) => rows.reduce((s, r) => s + (Number(r[k]) || 0), 0);
@@ -338,6 +351,14 @@ function computePayrollAgg(rows) {
   const n = rows.length;
   const payable = r2(sum('payable')), net = r2(sum('netPay'));
   const social = r2(sum('socialTotal')), tax = r2(sum('taxThis'));
+
+  // 分位数（应发/实发/社保/个税），用于"中位数口径"链路图与分布分析
+  const payArr = rows.map(r => Number(r.payable) || 0).sort((x, y) => x - y);
+  const netArr = rows.map(r => Number(r.netPay) || 0).sort((x, y) => x - y);
+  const socArr = rows.map(r => Number(r.socialTotal) || 0).sort((x, y) => x - y);
+  const taxArr = rows.map(r => Number(r.taxThis) || 0).sort((x, y) => x - y);
+  const R = v => Math.round(v);
+
   const a = {
     count: n,
     deptCount: new Set(rows.map(r => r.dept)).size,
@@ -345,6 +366,15 @@ function computePayrollAgg(rows) {
     burden: social + tax,                       // 社保+个税负担
     avgPayable: n ? Math.round(payable / n) : 0,
     avgNet: n ? Math.round(net / n) : 0,
+    // 中位数 / 四分位（应发口径）
+    medPayable: R(medianOf(payArr)), medNet: R(medianOf(netArr)),
+    p25Payable: R(quantile(payArr, 0.25)), p75Payable: R(quantile(payArr, 0.75)),
+    minPayable: payArr.length ? R(payArr[0]) : 0,
+    maxPayable: payArr.length ? R(payArr[payArr.length - 1]) : 0,
+    // 平均数与中位数的偏离度（>30% 说明被极端值拉高，平均数失真）
+    avgMedGap: (n && medianOf(payArr)) ? R((payable / n / medianOf(payArr) - 1) * 100) : 0,
+    // 达到平均线的人数占比
+    aboveAvgCount: n ? payArr.filter(v => v >= payable / n).length : 0,
     structure: [
       { name: '基本工资', value: r2(sum('basic')) },
       { name: '保密工资', value: r2(sum('secrecy')) },
@@ -372,31 +402,49 @@ function computePayrollAgg(rows) {
   // 部门维度聚合
   const deptMap = {};
   rows.forEach(r => {
-    deptMap[r.dept] = deptMap[r.dept] || { payable: 0, net: 0, social: 0, tax: 0, basic: 0, perf: 0, allowance: 0, n: 0, names: [] };
+    deptMap[r.dept] = deptMap[r.dept] || {
+      payable: 0, net: 0, social: 0, tax: 0, basic: 0, perf: 0, allowance: 0, n: 0, names: [],
+      payList: [], netList: [], socList: [], taxList: [],   // 原始值列表，用于算部门中位数/区间
+    };
     const d = deptMap[r.dept];
     d.payable = r2(d.payable + r.payable); d.net = r2(d.net + r.netPay);
     d.social = r2(d.social + r.socialTotal); d.tax = r2(d.tax + r.taxThis);
     d.basic = r2(d.basic + r.basic); d.perf = r2(d.perf + r.perf);
     d.allowance = r2(d.allowance + (r.postAllowance + r.otherAllowance));
+    d.payList.push(Number(r.payable) || 0); d.netList.push(Number(r.netPay) || 0);
+    d.socList.push(Number(r.socialTotal) || 0); d.taxList.push(Number(r.taxThis) || 0);
     d.n++; d.names.push(r.name);
   });
   a.dept = Object.keys(deptMap).map(k => {
     const d = deptMap[k];
+    const dm = medianOf(d.payList);
     return {
       dept: k, payable: d.payable, net: d.net, social: d.social, tax: d.tax, burden: r2(d.social + d.tax),
       basic: d.basic, perf: d.perf, allowance: d.allowance,
       n: d.n, avgPayable: Math.round(d.payable / d.n), avgNet: Math.round(d.net / d.n),
+      // 部门内中位数 / 区间（比部门平均更有代表性）
+      medPayable: R(medianOf(d.payList)), medNet: R(medianOf(d.netList)),
+      minPayable: d.payList.length ? R(Math.min(...d.payList)) : 0,
+      maxPayable: d.payList.length ? R(Math.max(...d.payList)) : 0,
+      medSocial: R(medianOf(d.socList)), medTax: R(medianOf(d.taxList)),
       names: d.names.join('、'),
     };
   }).sort((x, y) => y.payable - x.payable);
 
-  // 平均个人工资条链路（应发→社保→个税→实发）
+  // 个人工资条链路（应发→社保→个税→实发）
+  // 两套口径：avg = 人均（受极值影响大）；median = 中位数（代表典型员工）
   if (n) {
     a.avgSlip = [
-      { step: '应发工资', val: Math.round(payable / n), type: 'total' },
-      { step: '三险一金', val: -Math.round(social / n), type: 'minus' },
-      { step: '个人所得税', val: -Math.round(tax / n), type: 'minus' },
-      { step: '实发工资', val: Math.round(net / n), type: 'result' },
+      { step: '应发工资', val: R(payable / n), type: 'total' },
+      { step: '三险一金', val: -R(social / n), type: 'minus' },
+      { step: '个人所得税', val: -R(tax / n), type: 'minus' },
+      { step: '实发工资', val: R(net / n), type: 'result' },
+    ];
+    a.medSlip = [
+      { step: '应发工资', val: R(medianOf(payArr)), type: 'total' },
+      { step: '三险一金', val: -R(medianOf(socArr)), type: 'minus' },
+      { step: '个人所得税', val: -R(medianOf(taxArr)), type: 'minus' },
+      { step: '实发工资', val: R(medianOf(netArr)), type: 'result' },
     ];
   }
   return a;
@@ -411,12 +459,15 @@ async function renderSalary() {
   const yuan = v => '¥' + v.toLocaleString();
   const k = v => Math.round(v / 1000) + 'K';
 
+  // 平均数 vs 中位数偏离提示（超过 30% 说明被极端值拉高）
+  const gapWarn = A.avgMedGap >= 30;
   document.getElementById('salaryKpis').innerHTML = kpiHtml([
     { label: '应付总额', value: yuan(A.payable), delta: '', dir: 'up', icon: '💵' },
     { label: '实发总额', value: yuan(A.net), delta: '', dir: 'up', icon: '💰' },
-    { label: '人均实发', value: yuan(A.avgNet), delta: '', dir: 'up', icon: '👤' },
+    { label: '工资中位数(P50)', value: yuan(A.medPayable), delta: 'P25 ' + yuan(A.p25Payable) + ' / P75 ' + yuan(A.p75Payable), dir: 'up', icon: '🎯' },
+    { label: '人均应发', value: yuan(A.avgPayable), delta: gapWarn ? ('高于中位 ' + A.avgMedGap + '%') : '', dir: gapWarn ? 'down' : 'up', icon: '📊' },
     { label: '社保+个税负担', value: yuan(A.burden), delta: '', dir: 'up', icon: '🧾' },
-    { label: '发放人数', value: A.count, delta: '', dir: 'up', icon: '👥' },
+    { label: '发放人数', value: A.count, delta: A.aboveAvgCount + ' 人达平均线', dir: 'up', icon: '👥' },
   ]);
   // 同步顶部期间显示与下拉选中
   const sel = document.getElementById('saPeriodSel');
@@ -480,30 +531,146 @@ async function renderSalary() {
     }],
   });
 
-  // 5) 平均工资条链路（应发 → 社保 → 个税 → 实发）
-  const slip = A.avgSlip || [];
-  initChart('saSlip').setOption({
-    grid: { ...baseGrid, left: 20, right: 20 },
-    tooltip: { trigger: 'axis', valueFormatter: v => yuan(v) },
-    xAxis: { type: 'category', data: slip.map(s => s.step), ...axisStyle },
-    yAxis: { type: 'value', ...axisStyle, axisLabel: { formatter: k, color: SOFT } },
+  // 保存本次聚合结果到模块级变量：切换按钮的回调从此处读取最新数据，
+  // 避免闭包捕获首次渲染的旧 A 导致点击后显示过期数据。
+  LAST_SALARY_AGG = A;
+
+  // 5) 工资条链路（应发 → 社保 → 个税 → 实发），支持 人均/中位数 口径切换
+  const drawSlip = (mode) => {
+    const Ag = LAST_SALARY_AGG || A;
+    const slip = (mode === 'median' ? Ag.medSlip : Ag.avgSlip) || [];
+    initChart('saSlip').setOption({
+      grid: { ...baseGrid, left: 20, right: 20 },
+      tooltip: { trigger: 'axis', valueFormatter: v => yuan(v) },
+      xAxis: { type: 'category', data: slip.map(s => s.step), ...axisStyle },
+      yAxis: { type: 'value', ...axisStyle, axisLabel: { formatter: k, color: SOFT } },
+      series: [{
+        type: 'bar', data: slip.map(s => s.val),
+        barWidth: '42%',
+        itemStyle: { color: p => p.value >= 0 ? '#2ec4b6' : '#ee5a6f', borderRadius: [6, 6, 0, 0] },
+        label: { show: true, position: p => p.value >= 0 ? 'top' : 'bottom', color: TEXT, fontSize: 11, fontWeight: 600, formatter: p => yuan(p.value) },
+      }],
+    });
+    const note = document.getElementById('saSlipNote');
+    if (note) {
+      note.textContent = mode === 'median'
+        ? '中位数口径：代表团队里"中间那个人"的工资水平，不受高管等极端值影响。'
+        : (Ag.avgMedGap >= 30
+          ? '人均口径：注意！平均数比中位数高 ' + Ag.avgMedGap + '%，仅 ' + Ag.aboveAvgCount + '/' + Ag.count + ' 人达到此水平，已被高薪人员拉高。'
+          : '人均口径：全员平均，适合做成本预算与趋势对比。');
+    }
+  };
+  bindSegToggle('saSlipToggle', SA_SLIP_MODE, (m) => { SA_SLIP_MODE = m; drawSlip(m); });
+  drawSlip(SA_SLIP_MODE);
+
+  // 6) 部门成本 / 负担明细表，支持 人均/中位数 切换
+  const fmt = yuan;
+  const drawDeptTable = (mode) => {
+    const t = document.getElementById('saTable');
+    if (!t) return;
+    const Ag = LAST_SALARY_AGG || A;
+    const med = mode === 'median';
+    t.innerHTML = `<thead><tr><th>部门</th><th>人数</th><th>应付合计</th><th>三险一金</th><th>个税</th>` +
+      `<th>${med ? '工资中位数' : '人均应发'}</th><th>${med ? '实发中位数' : '人均实发'}</th><th>区间(最低~最高)</th></tr></thead>
+      <tbody>${Ag.dept.map(d => `<tr>
+        <td>${d.dept}</td>
+        <td>${d.n}</td><td>${fmt(d.payable)}</td>
+        <td>${fmt(d.social)}</td><td>${fmt(d.tax)}</td>
+        <td><b>${fmt(med ? d.medPayable : d.avgPayable)}</b></td>
+        <td>${fmt(med ? d.medNet : d.avgNet)}</td>
+        <td>${fmt(d.minPayable)} ~ ${fmt(d.maxPayable)}</td></tr>`).join('')}</tbody>`;
+  };
+  bindSegToggle('saDeptToggle', SA_DEPT_MODE, (m) => { SA_DEPT_MODE = m; drawDeptTable(m); });
+  drawDeptTable(SA_DEPT_MODE);
+
+  // 7) 工资分布区间（人数直方图）—— 看薪酬结构是否健康
+  const distBuckets = buildPayBuckets(rows.map(r => Number(r.payable) || 0));
+  initChart('saDist').setOption({
+    grid: { ...baseGrid, left: 60, right: 30, top: 30 },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: p => '应发 ' + p[0].name + '<br/><b>' + p[0].value + '</b> 人' },
+    xAxis: { type: 'category', data: distBuckets.map(b => b.label), ...axisStyle, axisLabel: { color: SOFT, fontSize: 11, interval: 0, rotate: distBuckets.length > 5 ? 24 : 0 } },
+    yAxis: { type: 'value', name: '人数', ...axisStyle, nameTextStyle: { color: SOFT }, minInterval: 1 },
     series: [{
-      type: 'bar', data: slip.map(s => s.val),
-      barWidth: '42%',
-      itemStyle: { color: p => p.value >= 0 ? '#2ec4b6' : '#ee5a6f', borderRadius: [6, 6, 0, 0] },
-      label: { show: true, position: p => p.value >= 0 ? 'top' : 'bottom', color: TEXT, fontSize: 11, fontWeight: 600, formatter: p => yuan(p.value) },
+      type: 'bar', data: distBuckets.map(b => b.count), barWidth: '62%',
+      itemStyle: { color: '#4361ee', borderRadius: [6, 6, 0, 0] },
+      label: { show: true, position: 'top', color: TEXT, fontSize: 11, fontWeight: 600 },
     }],
   });
 
-  // 6) 部门成本 / 负担明细表
-  const t = document.getElementById('saTable');
-  const fmt = yuan;
-  t.innerHTML = `<thead><tr><th>部门</th><th>人数</th><th>应付</th><th>实发</th><th>三险一金</th><th>个税</th><th>人均应发</th><th>人均实发</th></tr></thead>
-    <tbody>${A.dept.map(d => `<tr>
-      <td>${d.dept}</td>
-      <td>${d.n}</td><td>${fmt(d.payable)}</td><td>${fmt(d.net)}</td>
-      <td>${fmt(d.social)}</td><td>${fmt(d.tax)}</td>
-      <td>${fmt(d.avgPayable)}</td><td>${fmt(d.avgNet)}</td></tr>`).join('')}</tbody>`;
+  // 8) 各部门工资中位数对比（含最低~最高区间，用 bar + 误差线风格）
+  const deptMed = A.dept.slice().reverse();
+  initChart('saDeptMed').setOption({
+    grid: { ...baseGrid, left: 90, right: 30, top: 20 },
+    tooltip: {
+      trigger: 'axis', axisPointer: { type: 'shadow' },
+      formatter: p => {
+        const d = deptMed[p[0].dataIndex];
+        return d.dept + '<br/>中位数: ' + yuan(d.medPayable) + '<br/>区间: ' + yuan(d.minPayable) + ' ~ ' + yuan(d.maxPayable) + '<br/>人数: ' + d.n;
+      },
+    },
+    xAxis: { type: 'value', ...axisStyle, axisLabel: { formatter: k, color: SOFT } },
+    yAxis: { type: 'category', data: deptMed.map(d => d.dept), ...axisStyle },
+    series: [
+      { // 透明底柱：从最低值起，用来画区间
+        type: 'bar', stack: 'range', barWidth: '18%',
+        itemStyle: { color: 'transparent' },
+        data: deptMed.map(d => d.minPayable),
+        tooltip: { show: false },
+      },
+      { // 实际区间长度（最低~最高）
+        type: 'bar', stack: 'range', barWidth: '18%',
+        itemStyle: { color: 'rgba(67,97,238,0.28)', borderRadius: 3 },
+        data: deptMed.map(d => Math.max(0, d.maxPayable - d.minPayable)),
+      },
+      { // 中位数标记
+        type: 'bar', barWidth: '46%',
+        itemStyle: { color: '#2ec4b6', borderRadius: [0, 6, 6, 0] },
+        label: { show: true, position: 'right', color: TEXT, fontSize: 11, fontWeight: 600, formatter: p => yuan(p.value) },
+        data: deptMed.map(d => d.medPayable),
+      },
+    ],
+  });
+}
+
+// 口径切换状态（人均 / 中位数），在数据模块内声明以便跨重绘保持
+let SA_SLIP_MODE = 'avg';
+let SA_DEPT_MODE = 'avg';
+// 最近一次薪酬聚合结果（供切换按钮回调读取，避免使用过期的闭包快照）
+let LAST_SALARY_AGG = null;
+// 绑定分段切换按钮（高亮当前项 + 回调）
+function bindSegToggle(containerId, curMode, onChange) {
+  const box = document.getElementById(containerId);
+  if (!box) return;
+  box.querySelectorAll('.seg-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === curMode);
+    if (b._bound) return;
+    b._bound = true;
+    b.addEventListener('click', () => {
+      box.querySelectorAll('.seg-btn').forEach(x => x.classList.toggle('active', x === b));
+      onChange(b.dataset.mode);
+    });
+  });
+}
+// 按应发工资自动分桶（用于分布直方图）
+function buildPayBuckets(vals) {
+  const arr = vals.filter(v => v > 0).sort((a, b) => a - b);
+  if (!arr.length) return [];
+  const min = arr[0], max = arr[arr.length - 1];
+  if (min === max) return [{ label: yuan(Math.round(min)), count: arr.length }];
+  // 用 1万 为步长，最多 8 档
+  const step = Math.max(5000, Math.ceil((max - min) / 6 / 5000) * 5000);
+  const start = Math.floor(min / step) * step;
+  const w = v => (v % 10000 === 0 ? (v / 10000) : (v / 10000).toFixed(1));
+  const buckets = [];
+  for (let s = start; s < max + step; s += step) {
+    buckets.push({ label: w(s) + '~' + w(s + step) + '万', lo: s, hi: s + step, count: 0 });
+    if (buckets.length >= 8) break;
+  }
+  arr.forEach(v => {
+    const b = buckets.find(b => v >= b.lo && v < b.hi) || buckets[buckets.length - 1];
+    if (b) b.count++;
+  });
+  return buckets.filter((b, i) => b.count > 0 || (buckets[i - 1] && buckets[i - 1].count > 0) || (buckets[i + 1] && buckets[i + 1].count > 0));
 }
 
 // 若后端数据变化，强制重绘（删除渲染缓存）

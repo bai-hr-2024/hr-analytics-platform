@@ -164,14 +164,37 @@
         </div>
         <div class="grid-2">
           <div class="card">
-            <div class="card-head"><h3>人均工资条链路（应发→社保→个税→实发）</h3></div>
+            <div class="card-head" style="flex-wrap:wrap;gap:8px">
+              <h3 id="saSlipTitle">工资条链路（应发→社保→个税→实发）</h3>
+              <div class="seg-toggle" id="saSlipToggle">
+                <button type="button" class="seg-btn active" data-mode="avg">人均口径</button>
+                <button type="button" class="seg-btn" data-mode="median">中位数口径</button>
+              </div>
+            </div>
+            <div id="saSlipNote" style="padding:0 16px;font-size:12px;color:#6b7892"></div>
             <div class="chart" id="saSlip"></div>
           </div>
           <div class="card">
-            <div class="card-head"><h3>部门成本与税负明细</h3></div>
+            <div class="card-head" style="flex-wrap:wrap;gap:8px">
+              <h3 id="saDeptTitle">部门成本与税负明细</h3>
+              <div class="seg-toggle" id="saDeptToggle">
+                <button type="button" class="seg-btn active" data-mode="avg">人均</button>
+                <button type="button" class="seg-btn" data-mode="median">中位数</button>
+              </div>
+            </div>
             <div class="table-wrap" style="max-height:360px;overflow:auto">
               <table class="data-table" id="saTable"></table>
             </div>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h3>工资分布区间（人数）</h3></div>
+            <div class="chart" id="saDist"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>各部门工资中位数对比（含区间）</h3></div>
+            <div class="chart" id="saDeptMed"></div>
           </div>
         </div>
       </section>
