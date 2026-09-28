@@ -100,15 +100,29 @@ function ensureStore() {
 function resolveTaskDates(seed) {
   const DAY = 86400000;
   const base = Date.now();
+  const fmt = ms => new Date(ms).toISOString().slice(0, 10);
+  // 本周一零点：已完成事项的完成时间落在本周内，周报 / 本周 KPI 才有数
+  const now = new Date();
+  const dow = now.getDay() === 0 ? 7 : now.getDay();
+  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (dow - 1)).getTime();
+
   return seed.map((t, i) => {
-    const { startOffset, dueOffset, ...rest } = t;
-    const fmt = ms => new Date(ms).toISOString().slice(0, 10);
-    return {
+    const { startOffset, dueOffset, updatedOffset, ...rest } = t;
+    const updMs = base + (Number(updatedOffset) || 0) * DAY;
+    const o = {
       ...rest,
       id: 'T' + String(1001 + i),
       start: fmt(base + (Number(startOffset) || 0) * DAY),
       due: fmt(base + (Number(dueOffset) || 0) * DAY),
+      updatedAt: new Date(updMs).toISOString(),
     };
+    if (o.status === '已完成') {
+      // 尽量保留原偏移，但不超出本周一，保证「本周已完成」统计有效
+      let d = Math.max(monday, Math.min(updMs, base));
+      o.completedAt = fmt(d);
+      o.updatedAt = new Date(d).toISOString();
+    }
+    return o;
   });
 }
 
@@ -409,14 +423,14 @@ app.put('/api/ai/config', (req, res) => {
 // 构造分析提示词（把控导向：只针对用户录入的真实任务，产出可执行的管控动作）
 function buildPrompt(tasks, today) {
   const compact = (tasks || []).slice(0, 200).map(t => ({
-    任务: t.name, 负责人: t.owner, 团队: t.team, 优先级: t.priority,
+    事项: t.name, 分类: t.category, 优先级: t.priority,
     状态: t.status, 进度: t.progress, 开始: t.start, 截止: t.due, 工时: t.hours, 备注: t.remark || '',
   }));
-  return `你是我的项目管理搭档。下面是我在跟进的【真实任务清单】，请只基于这些数据，告诉我该怎么把控。
+  return `你是我的个人工作管理搭档。我是 HR，下面是我自己记录的【真实工作事项清单】，请只基于这些数据，告诉我下一步该怎么安排。
 
 今天是 ${today}。
 
-我的任务清单（JSON）：
+我的工作事项清单（JSON）：
 ${JSON.stringify(compact, null, 1)}
 
 判定规则（必须严格遵守）：
@@ -425,30 +439,29 @@ ${JSON.stringify(compact, null, 1)}
 
 请严格按以下 JSON 输出，不要输出任何解释、前言或 markdown 代码块：
 {
-  "score": <0-100 整数，我对这批任务的把控健康度>,
-  "verdict": "<总体研判，55字以内，必须点名最关键的那个人或那个任务，不要说套话>",
+  "score": <0-100 整数，我对这批事项的把控健康度>,
+  "verdict": "<总体研判，55字以内，必须点名最关键的那件事，不要说套话>",
   "actions": [
     {
       "level": "critical|warning",
-      "task": "<任务名，必须来自清单>",
-      "owner": "<负责人，必须来自清单>",
+      "task": "<事项名，必须来自清单>",
       "problem": "<问题到底是什么，必须带数字：如逾期5天/进度15%但应达64%>",
-      "action": "<我作为管理者具体该做什么，要可执行，禁止'加强沟通'这类空话>",
+      "action": "<【我本人】今天/本周具体该做什么，要可执行，禁止'加强沟通'这类空话>",
       "by": "<什么时间前，如 今天 / 本周五前 / 9月15日前>"
     }
   ],
   "controls": [
-    { "type": "资源调配|节奏控制|风险预警|机制优化", "title": "<把控点，18字以内>", "detail": "<怎么做，55字以内，要具体>" }
+    { "type": "节奏控制|风险预警|机制优化|批量处理", "title": "<把控点，18字以内>", "detail": "<怎么做，55字以内，要具体>" }
   ],
-  "watchlist": ["<接下来最该盯住的任务名1>", "<任务名2>"]
+  "watchlist": ["<接下来最该盯住的事项名1>", "<事项名2>"]
 }
 
 硬性要求：
 1. actions 输出 3-5 条，按紧急度排序，level=critical 排最前；若没有紧急项，全部给 warning。
-2. controls 输出 2-4 条，是给我的【管理动作建议】，不是对任务的描述。
-3. watchlist 输出 2-5 个任务名。
-4. 所有 task、owner、watchlist 里的名字【必须与清单完全一致】，严禁编造任何清单中不存在的任务或人。
-5. action 必须是我能立刻执行的动作（找谁、调整什么、砍掉什么、加什么人、重定什么时间）。
+2. controls 输出 2-4 条，是对【我个人工作节奏】的建议，不是对事项的重复描述。
+3. watchlist 输出 2-5 个事项名。
+4. 所有 task、watchlist 里的名字【必须与清单完全一致】，严禁编造清单中不存在的事项。
+5. action 必须是我本人能立刻执行的动作（先做哪一步、砍掉什么、重定什么时间、找谁要什么东西）。
 6. 如果清单整体健康，actions 仍要给出 1-2 条预防性动作（防止滑落），不要留空。
 7. 不要写"建议加强沟通""建议关注进度"这类无信息量的话。`;
 }
@@ -501,13 +514,13 @@ app.post('/api/ai/analyze', async (req, res) => {
     return res.status(400).json({ ok: false, needConfig: true, error: '尚未配置大模型，请在「AI 设置」中填写 API Key。' });
   }
   const tasks = req.body && req.body.tasks;
-  if (!Array.isArray(tasks) || !tasks.length) {
-    return res.status(400).json({ ok: false, error: '没有可分析的任务数据' });
+      if (!Array.isArray(tasks) || !tasks.length) {
+    return res.status(400).json({ ok: false, error: '没有可分析的工作事项' });
   }
   const today = new Date().toISOString().slice(0, 10);
   try {
     const content = await callLlm(cfg, [
-      { role: 'system', content: '你是专业的项目管理与人力效能分析顾问，只输出严格合法的 JSON。' },
+      { role: 'system', content: '你是资深的个人效能与人力工作顾问，只输出严格合法的 JSON。' },
       { role: 'user', content: buildPrompt(tasks, today) },
     ]);
     const parsed = parseLlmJson(content);
@@ -534,7 +547,7 @@ app.post('/api/ai/analyze', async (req, res) => {
     // 管理把控建议
     const controls = Array.isArray(parsed.controls) ? parsed.controls : [];
     norm.controls = controls.filter(c => c && (c.title || c.detail)).slice(0, 6).map(c => ({
-      type: ['资源调配', '节奏控制', '风险预警', '机制优化'].includes(c.type) ? c.type : '风险预警',
+      type: ['节奏控制', '风险预警', '机制优化', '批量处理'].includes(c.type) ? c.type : '风险预警',
       title: String(c.title || '').slice(0, 60),
       detail: String(c.detail || '').slice(0, 250),
     }));
@@ -557,6 +570,31 @@ app.post('/api/ai/analyze', async (req, res) => {
     res.json(norm);
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message || 'AI 分析失败' });
+  }
+});
+
+// 周报润色（把结构化素材润色成可直接发出去的周报正文）
+app.post('/api/ai/polish', async (req, res) => {
+  const cfg = readAiConfig();
+  if (!cfg.enabled || !cfg.apiKey) {
+    return res.status(400).json({ ok: false, needConfig: true, error: '尚未配置大模型，请先在「AI 设置」中填写 API Key。' });
+  }
+  const raw = String((req.body && req.body.text) || '').trim();
+  if (!raw) return res.status(400).json({ ok: false, error: '没有可润色的周报内容' });
+  try {
+    const content = await callLlm(cfg, [
+      {
+        role: 'system',
+        content: '你是资深 HR 从业者的写作助手。把用户给出的工作素材整理成一份可直接发给领导的周报。'
+          + '要求：正式、克制、有数据；不要编造素材里没有的事实和数据；'
+          + '结构为「本周完成 / 进行中 / 下周计划 / 需支持协调」，每类 3-6 条，每条一行，动词开头；'
+          + '只输出周报正文，不要任何解释、不要 Markdown 代码块标记。',
+      },
+      { role: 'user', content: '以下是本周工作素材：\n\n' + raw.slice(0, 6000) },
+    ]);
+    res.json({ ok: true, text: String(content).trim(), model: cfg.model });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message || '润色失败' });
   }
 });
 

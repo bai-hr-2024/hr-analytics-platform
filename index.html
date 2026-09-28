@@ -32,7 +32,7 @@
           <span class="nav-icon">🏆</span><span>绩效驾驶舱</span>
         </button>
         <button class="nav-item" data-view="tasks">
-          <span class="nav-icon">✅</span><span>任务进度看板</span>
+          <span class="nav-icon">📝</span><span>工作记录看板</span>
         </button>
         <button class="nav-item" data-view="employees">
           <span class="nav-icon">🗂️</span><span>员工明细</span>
@@ -253,10 +253,22 @@
           <div id="smartPanel" class="smart-panel"></div>
         </div>
 
+        <!-- 下一步建议（规则引擎，实时） -->
+        <div class="card next-card">
+          <div class="card-head">
+            <h3>🧭 下一步该做什么 <span class="ai-source rule" id="nextSrc">规则引擎实时生成</span></h3>
+            <div class="ai-actions">
+              <button class="btn" id="btnCarryAll">⏭ 逾期一键顺延</button>
+              <button class="btn btn-excel" id="btnWeekly">📝 一键生成周报</button>
+            </div>
+          </div>
+          <div id="nextActions" class="next-actions"></div>
+        </div>
+
         <!-- AI 智能分析 -->
         <div class="card ai-card">
           <div class="card-head">
-            <h3>🤖 AI 进度分析 <span id="aiSource" class="ai-source"></span></h3>
+            <h3>🤖 AI 全局把控分析 <span id="aiSource" class="ai-source"></span></h3>
             <div class="ai-actions">
               <button class="btn btn-llm" id="btnAiDeep">✨ AI 深度分析</button>
               <button class="btn" id="btnAiSettings">⚙️ 设置</button>
@@ -265,19 +277,19 @@
           </div>
           <div id="aiInsights" class="ai-insights"></div>
           <div class="ai-scope">
-            🔒 「AI 深度分析」只会把你录入的<b>任务清单</b>（任务名/负责人/团队/优先级/状态/进度/起止日期/工时/备注）发送给所选模型，
+            🔒 「AI 深度分析」只会把你录入的<b>工作事项清单</b>（事项名/分类/优先级/状态/进度/起止日期/工时/备注）发送给所选模型，
             <b>不包含</b>员工薪资、年龄、学历等人员敏感信息。
           </div>
         </div>
 
         <div class="grid-2">
           <div class="card">
-            <div class="card-head"><h3>任务状态分布</h3></div>
+            <div class="card-head"><h3>工作事项状态分布</h3></div>
             <div class="chart" id="tkStatus"></div>
           </div>
           <div class="card">
-            <div class="card-head"><h3>各团队任务完成率</h3></div>
-            <div class="chart" id="tkTeam"></div>
+            <div class="card-head"><h3>各分类完成情况（堆叠）</h3></div>
+            <div class="chart" id="tkCatStack"></div>
           </div>
         </div>
         <div class="grid-2">
@@ -286,8 +298,8 @@
             <div class="chart" id="tkPriority"></div>
           </div>
           <div class="card">
-            <div class="card-head"><h3>工作量投入（工时）</h3></div>
-            <div class="chart" id="tkHours"></div>
+            <div class="card-head"><h3>各类工作投入（工时）</h3></div>
+            <div class="chart" id="tkCatHours"></div>
           </div>
         </div>
         <div class="card">
@@ -300,11 +312,18 @@
           <div class="emp-toolbar">
             <h3>日常工作明细（录入 / 跟踪）</h3>
             <div class="emp-actions">
-              <input id="tkSearch" class="emp-search" placeholder="搜索任务 / 负责人" />
-              <select id="tkTeamFilter"><option value="">全部团队</option></select>
+              <div class="seg-toggle" id="tkViewToggle">
+                <button class="seg-btn active" data-view="today">今日</button>
+                <button class="seg-btn" data-view="week">本周</button>
+                <button class="seg-btn" data-view="open">未完成</button>
+                <button class="seg-btn" data-view="done">已完成</button>
+                <button class="seg-btn" data-view="all">全部</button>
+              </div>
+              <input id="tkSearch" class="emp-search" placeholder="搜索事项 / 备注" />
+              <select id="tkCatFilter"><option value="">全部分类</option></select>
               <select id="tkStatusFilter"><option value="">全部状态</option><option>未开始</option><option>进行中</option><option>已完成</option><option>阻塞</option></select>
               <select id="tkPriorityFilter"><option value="">全部优先级</option><option>高</option><option>中</option><option>低</option></select>
-              <button class="btn btn-add" id="btnTaskAdd">＋ 新增任务</button>
+              <button class="btn btn-add" id="btnTaskAdd">＋ 新增事项</button>
               <button class="btn btn-pdf" id="btnTaskPdf">🖨 A4 打印版</button>
               <button class="btn btn-excel" id="btnTaskExcel">⬇ 导出 Excel</button>
             </div>
@@ -386,9 +405,8 @@
       <form id="taskForm" class="emp-form">
         <input type="hidden" id="t_id" />
         <div class="form-grid">
-          <label class="span-2">任务名称<input id="t_name" required placeholder="如：Q2 招聘计划" /></label>
-          <label>负责人<input id="t_owner" required placeholder="如：张伟" /></label>
-          <label>所属团队<select id="t_team"></select></label>
+          <label class="span-2">工作事项<input id="t_name" required placeholder="如：本周完成 3 个岗位的面试安排" /></label>
+          <label>工作分类<select id="t_category"></select></label>
           <label>优先级<select id="t_priority"><option>高</option><option selected>中</option><option>低</option></select></label>
           <label>状态<select id="t_status"><option>未开始</option><option selected>进行中</option><option>已完成</option><option>阻塞</option></select></label>
           <label>开始日期<input id="t_start" type="date" /></label>
@@ -444,6 +462,25 @@
           API Key 只保存在服务端 <code>data/ai-config.json</code>，前端接口只返回脱敏后的掩码。
           未配置时，「AI 深度分析」会自动回退到内置规则引擎。
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 本周工作周报 弹窗 -->
+  <div class="modal" id="weeklyModal">
+    <div class="modal-box modal-narrow">
+      <div class="modal-head">
+        <h3>📝 本周工作周报</h3>
+        <button class="modal-close" id="weeklyModalClose" aria-label="关闭">×</button>
+      </div>
+      <div class="weekly-body">
+        <div id="weeklyText" class="weekly-text" contenteditable="true" spellcheck="false"></div>
+      </div>
+      <div class="form-actions">
+        <span id="weeklyTip" class="ai-test-result"></span>
+        <button type="button" class="btn" id="weeklyCancel">关闭</button>
+        <button type="button" class="btn btn-llm" id="weeklyAi">✨ AI 润色</button>
+        <button type="button" class="btn btn-excel" id="weeklyCopy">📋 复制全文</button>
       </div>
     </div>
   </div>

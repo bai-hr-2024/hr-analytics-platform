@@ -972,12 +972,178 @@ let TASKS = [];
 let tasksInited = false;
 let tkState = { filtered: [], page: 1, pageSize: 8, sortKey: 'due', sortDir: 1 };
 
+// 「只记自己的」视角：弱化负责人/团队维度，改为事项本位 + 工作分类
 const TK_COLS = [
-  { key: 'name', label: '任务名称' }, { key: 'owner', label: '负责人' }, { key: 'team', label: '团队' },
+  { key: 'name', label: '工作事项' }, { key: 'category', label: '分类' },
   { key: 'priority', label: '优先级' }, { key: 'status', label: '状态' }, { key: 'progress', label: '进度' },
-  { key: 'start', label: '开始' }, { key: 'due', label: '截止' }, { key: 'hours', label: '工时' },
+  { key: 'due', label: '截止' }, { key: 'hours', label: '工时' },
   { key: 'remark', label: '备注' },
 ];
+
+// ============================================================
+//  工作分类（Category）—— 录入时按关键词自动判定，用于分类统计
+//  分类设计面向"个人日常工作"，非团队项目维度。
+// ============================================================
+const WORK_CATEGORIES = [
+  { name: '招聘', color: '#4361ee', icon: '🧑‍💼', kw: /招聘|面试|候选人|入职|offer|Offer|校招|社招|猎头|简历|笔试|背调|录用|试用期转正|转正/ },
+  { name: '薪酬', color: '#2ec4b6', icon: '💰', kw: /工资|薪酬|薪资|社保|公积金|个税|报税|考勤|绩效奖金|调薪|花名册|人力成本/ },
+  { name: '员工关系', color: '#8b5cf6', icon: '🤝', kw: /离职|辞退|劳动|合同|纠纷|员工沟通|面谈|投诉|仲裁|工伤|社保转移|竞业/ },
+  { name: '工商行政', color: '#ff9f43', icon: '🏢', kw: /工商|变更|增资|减资|股权|注册|注销|执照|经营范围|法人|地址变更|备案|年报|印章|开户|银行/ },
+  { name: '报销财务', color: '#ee5a6f', icon: '🧾', kw: /报销|贴票|发票|费用|付款|开票|借款|票据|预算|结算|付款申请/ },
+  { name: '制度建设', color: '#48cae4', icon: '📘', kw: /制度|流程|规章|制度?建设|SOP|规范|通知|发文|政策|手册|修订/ },
+  { name: '培训发展', color: '#f72585', icon: '📚', kw: /培训|课程|学习|内训|团建|拓展|课程表|讲师|题库|考试/ },
+  { name: '外部对接', color: '#7209b7', icon: '📞', kw: /对接|拜访|开会|会议|评审|汇报|接待|协调|沟通会|政府|街道|园区|拜访客户/ },
+  { name: '其他', color: '#8896b3', icon: '📌', kw: null, fallback: true },
+];
+const CAT_COLOR = Object.fromEntries(WORK_CATEGORIES.map(c => [c.name, c.color]));
+const CAT_ICON = Object.fromEntries(WORK_CATEGORIES.map(c => [c.name, c.icon]));
+// 依文本自动判定分类（优先具体分类，最后兜底"其他"）
+function detectCategory(text) {
+  const s = String(text || '');
+  const hit = WORK_CATEGORIES.find(c => !c.fallback && c.kw && c.kw.test(s));
+  return hit ? hit.name : '其他';
+}
+
+// ============================================================
+//  下一步建议引擎（规则版，免费 / 离线 / 即时）
+//  输入全部事项，输出按紧急度排序的行动清单，每条含：
+//    urgency 分值越大越紧急； action 建议动作； reason 触发原因
+// ============================================================
+function buildNextActions(allTasks) {
+  const today = todayStr();
+  const todayN = d2n(today);
+  const acts = [];
+
+  allTasks.forEach(t => {
+    if (t.status === '已完成') return;               // 已完成不再给建议
+    const h = taskHealth(t, today);
+    const name = t.name || '(未命名事项)';
+    const cat = t.category || detectCategory(name);
+    const daysLeft = h.daysLeft;
+    const prog = Number(t.progress) || 0;
+    const staleDays = t.updatedAt ? Math.round((todayN - d2n(String(t.updatedAt).slice(0, 10))) / 86400000) : null;
+
+    // ① 已逾期 → 最紧急
+    if (h.overdue) {
+      const od = Math.abs(daysLeft);
+      acts.push({
+        urgency: 100 + od, level: 'danger', icon: '🚨', title: name, cat,
+        reason: `已逾期 ${od} 天${t.due ? `（原定 ${t.due}）` : ''}${prog ? `，进度 ${prog}%` : ''}`,
+        action: od >= 7
+          ? '逾期超一周：建议今天确认是否仍需推进——若要做就拆成小步骤今天启动第一步，若已无意义就标记为取消/关闭，别让它继续占着待办。'
+          : '建议今天就处理掉，或把截止日期改到一个你真能完成的日期（改期限比一直挂着更诚实）。',
+        due: t.due, taskId: t.id, sortKey: 0,
+      });
+      return;
+    }
+    // ② 阻塞中
+    if (t.status === '阻塞') {
+      acts.push({
+        urgency: 90, level: 'danger', icon: '⛔', title: name, cat,
+        reason: '当前标记为「阻塞」' + (prog ? `，进度停在 ${prog}%` : ''),
+        action: '先解决卡点：明确是被谁/什么事挡住了，能推动就今天推一步，推不动就升级给能拍板的人，不要在原地等。',
+        due: t.due, taskId: t.id, sortKey: 1,
+      });
+      return;
+    }
+    // ③ 明天/今天到期 且未完成
+    if (daysLeft !== null && daysLeft <= 1 && !h.done) {
+      acts.push({
+        urgency: 80, level: 'warn', icon: '⏰', title: name, cat,
+        reason: daysLeft <= 0 ? '今天到期' : '明天到期' + `，目前进度 ${prog}%`,
+        action: prog >= 80 ? '进度已接近完成，建议今天收尾并标记完成。' : '时间紧而进度不足，建议今晚重点是把它推进到可交付状态，实在来不及就提前和相关方沟通延期。',
+        due: t.due, taskId: t.id, sortKey: 2,
+      });
+      return;
+    }
+    // ④ 进度严重滞后（落后时间进度 20 个百分点以上）
+    if (h.deviation !== null && h.deviation <= -20) {
+      acts.push({
+        urgency: 60, level: 'warn', icon: '📉', title: name, cat,
+        reason: `时间已过 ${Math.round(h.timeProgress)}%，实际进度只有 ${prog}%（落后 ${Math.abs(Math.round(h.deviation))} 个百分点）`,
+        action: '进度落后明显：建议把它拆成更小的子步骤，先完成最关键的那一步；或者评估是否资源不足需要协调支持。',
+        due: t.due, taskId: t.id, sortKey: 3,
+      });
+      return;
+    }
+    // ⑤ 长期未更新（≥7 天无任何推进）
+    if (staleDays !== null && staleDays >= 7 && prog < 100) {
+      acts.push({
+        urgency: 40 + Math.min(30, staleDays), level: 'warn', icon: '💤', title: name, cat,
+        reason: `已 ${staleDays} 天没有更新，进度停在 ${prog}%`,
+        action: '长期没动静通常意味着它被遗忘了：建议今天花 10 分钟推一小步，或者直接关闭/转派，别让它变成"僵尸待办"。',
+        due: t.due, taskId: t.id, sortKey: 4,
+      });
+      return;
+    }
+    // ⑥ 尚未启动
+    if (t.status === '未开始' || prog === 0) {
+      acts.push({
+        urgency: 25, level: 'info', icon: '📥', title: name, cat,
+        reason: '尚未启动' + (daysLeft !== null ? `，距截止还有 ${daysLeft} 天` : ''),
+        action: '建议先花 15 分钟做"启动动作"（列清单/约人/发消息），很多事一旦破冰就会自动往前走。',
+        due: t.due, taskId: t.id, sortKey: 5,
+      });
+      return;
+    }
+    // ⑦ 正常推进中
+    acts.push({
+      urgency: 10, level: 'good', icon: '🔄', title: name, cat,
+      reason: `推进正常，进度 ${prog}%` + (daysLeft !== null ? `，还剩 ${daysLeft} 天` : ''),
+      action: prog >= 60 ? '保持节奏，本期应能完成。' : '按当前节奏继续即可。',
+      due: t.due, taskId: t.id, sortKey: 6,
+    });
+  });
+
+  // 按紧急度降序
+  acts.sort((a, b) => b.urgency - a.urgency);
+  return acts;
+}
+
+// 同类事项堆积检测（≥3 项同分类未完成 → 建议批量处理）
+function buildCategoryPileups(allTasks) {
+  const open = allTasks.filter(t => t.status !== '已完成');
+  const map = {};
+  open.forEach(t => {
+    const c = t.category || detectCategory(t.name);
+    (map[c] = map[c] || []).push(t);
+  });
+  return Object.entries(map)
+    .filter(([, v]) => v.length >= 3)
+    .map(([c, v]) => ({
+      cat: c, n: v.length, icon: CAT_ICON[c] || '📌', color: CAT_COLOR[c] || '#8896b3',
+      names: v.map(t => t.name),
+    }))
+    .sort((a, b) => b.n - a.n);
+}
+
+// 周报数据汇总（本周一 ~ 本周日）
+function buildWeeklyReport(allTasks) {
+  const { start, end } = weekRangeJs();
+  const today = todayStr();
+  // 本周有进展的事：完成时间在本周，或更新时间在本周，或预计本周到期
+  const touched = allTasks.filter(t => {
+    const done = t.completedAt || t.updatedAt || '';
+    const d = String(done).slice(0, 10);
+    return (d && d >= start && d <= end) || (t.due && t.due >= start && t.due <= end);
+  });
+  const done = touched.filter(t => t.status === '已完成');
+  const doing = allTasks.filter(t => t.status === '进行中');
+  const blocked = allTasks.filter(t => t.status === '阻塞');
+  const notStarted = allTasks.filter(t => t.status === '未开始');
+  const overdue = allTasks.filter(t => t.status !== '已完成' && taskHealth(t, today).overdue);
+  // 下周重点：未来 7 天内到期且未完成
+  const soon = allTasks.filter(t => {
+    if (t.status === '已完成' || !t.due) return false;
+    const dl = daysBetween(today, t.due);
+    return dl !== null && dl >= 0 && dl <= 7;
+  }).sort((a, b) => String(a.due).localeCompare(String(b.due)));
+  // 分类分布（本周有更新的）
+  const catMap = {};
+  done.concat(touched).forEach(t => { const c = t.category || detectCategory(t.name); catMap[c] = (catMap[c] || 0) + 1; });
+  const hours = touched.reduce((a, t) => a + (Number(t.hours) || 0), 0);
+  return { start, end, touched, done, doing, blocked, notStarted, overdue, soon, catMap, hours, today };
+}
 
 const TK_STATUS_COLOR = { '已完成': '#2ec4b6', '进行中': '#4361ee', '未开始': '#cdd7ec', '阻塞': '#ee5a6f' };
 const TK_PRIO_COLOR = { '高': '#ee5a6f', '中': '#ff9f43', '低': '#2ec4b6' };
@@ -1016,18 +1182,22 @@ function computeTaskAgg(tasks) {
   const status = groupCount(tasks, 'status');
   const priority = groupCount(tasks, 'priority');
 
-  // 团队：完成率（平均进度）+ 工时
-  const teamMap = new Map();
+  // 工作分类：件数 / 完成率（平均进度）/ 工时 / 进行中
+  const catMap = new Map();
   tasks.forEach(t => {
-    const k = t.team || '未指定';
-    if (!teamMap.has(k)) teamMap.set(k, { team: k, sum: 0, n: 0, hours: 0, active: 0 });
-    const o = teamMap.get(k);
+    const k = t.category || detectCategory(t.name);
+    if (!catMap.has(k)) catMap.set(k, { cat: k, sum: 0, n: 0, hours: 0, active: 0, done: 0, todo: 0 });
+    const o = catMap.get(k);
     o.sum += (t.progress || 0); o.n += 1; o.hours += (t.hours || 0);
     if (t.status === '进行中') o.active += 1;
+    if (t.status === '已完成') o.done += 1;
+    if (t.status !== '已完成') o.todo += 1;
   });
-  const teams = [...teamMap.values()].map(o => ({
-    team: o.team, rate: Math.round(o.sum / o.n), hours: o.hours, active: o.active, count: o.n,
-  })).sort((a, b) => b.rate - a.rate);
+  const cats = [...catMap.values()].map(o => ({
+    cat: o.cat, rate: Math.round(o.sum / o.n), hours: o.hours,
+    active: o.active, done: o.done, todo: o.todo, count: o.n,
+    icon: CAT_ICON[o.cat] || '📌', color: CAT_COLOR[o.cat] || '#8896b3',
+  })).sort((a, b) => b.count - a.count || b.todo - a.todo);
 
   // 健康统计
   const health = tasks.map(t => ({ t, ...taskHealth(t, today) }));
@@ -1049,76 +1219,76 @@ function computeTaskAgg(tasks) {
   score -= notStarted.length * 1;
   score = Math.max(0, Math.min(100, Math.round(score)));
 
-  return { total, status, priority, teams, avgProgress, totalHours, health,
+  // 本周（周一~周日）完成数：用于个人周节奏 KPI
+  const wk = weekRangeJs();
+  const wkDone = tasks.filter(t => t.status === '已完成' && (t.completedAt || t.updatedAt || '')
+    && String(t.completedAt || t.updatedAt).slice(0, 10) >= wk.start
+    && String(t.completedAt || t.updatedAt).slice(0, 10) <= wk.end).length;
+
+  return { total, status, priority, cats, avgProgress, totalHours, health, wkDone,
     overdue, blocked, lagging, dueSoon, notStarted, done, score };
+}
+
+// 本周（周一~周日）日期区间字符串
+function weekRangeJs() {
+  const now = new Date();
+  const day = now.getDay() === 0 ? 7 : now.getDay();          // 周一=1
+  const monday = new Date(now); monday.setDate(now.getDate() - (day - 1));
+  const sunday = new Date(monday); sunday.setDate(monday.getDate() + 6);
+  const fmt = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  return { start: fmt(monday), end: fmt(sunday) };
 }
 
 // ---------- AI 分析引擎 ----------
 function analyzeTasks(agg) {
   const ins = [];
-  const { total, overdue, blocked, lagging, dueSoon, notStarted, done, score, teams, avgProgress } = agg;
-  if (!total) return { score: 0, items: [{ level: 'info', icon: '📋', title: '暂无任务数据', text: '请点击「＋ 新增任务」录入日常工作，系统将自动分析进度风险。' }] };
+  const { total, overdue, blocked, lagging, dueSoon, notStarted, done, score, cats, avgProgress } = agg;
+  if (!total) return { score: 0, items: [{ level: 'info', icon: '📋', title: '暂无工作记录', text: '用上方输入框一句话记录，或点「＋ 新增事项」，系统会自动分析进度风险并给出下一步建议。' }] };
 
   // 1. 逾期
   if (overdue.length) {
-    const names = overdue.slice(0, 3).map(h => `${h.t.name}（${h.t.owner}，逾期 ${Math.abs(h.daysLeft)} 天）`).join('；');
-    ins.push({ level: 'critical', icon: '🚨', title: `${overdue.length} 项任务已逾期`,
+    const names = overdue.slice(0, 3).map(h => `${h.t.name}（逾期 ${Math.abs(h.daysLeft)} 天）`).join('；');
+    ins.push({ level: 'critical', icon: '🚨', title: `${overdue.length} 项已逾期`,
       text: names + (overdue.length > 3 ? ` 等 ${overdue.length} 项` : ''),
-      advice: '建议：立即与负责人确认卡点，重新评估交付时间或拆分任务降低单次交付压力。' });
+      advice: '建议：今天先在「下一步该做什么」里决定——要么顺延到真能做的日期，要么直接关闭。挂着不动只会一直消耗注意力。' });
   }
   // 2. 阻塞
   if (blocked.length) {
-    ins.push({ level: 'critical', icon: '⛔', title: `${blocked.length} 项任务处于阻塞状态`,
-      text: blocked.slice(0, 3).map(t => `${t.name}（${t.owner}${t.remark ? '：' + t.remark : ''}）`).join('；'),
-      advice: '建议：优先升级协调资源，阻塞任务每多滞留一天，下游依赖都会顺延。' });
+    ins.push({ level: 'critical', icon: '⛔', title: `${blocked.length} 项处于阻塞`,
+      text: blocked.slice(0, 3).map(t => `${t.name}${t.remark ? '：' + t.remark : ''}`).join('；'),
+      advice: '建议：阻塞的解除往往卡在"等别人"，今天就发一条催办消息，把球踢出去。' });
   }
   // 3. 进度滞后
   if (lagging.length) {
-    const worst = lagging.sort((a, b) => a.deviation - b.deviation).slice(0, 3);
-    ins.push({ level: 'warning', icon: '⚠️', title: `${lagging.length} 项任务进度落后于时间进度`,
+    const worst = lagging.slice().sort((a, b) => a.deviation - b.deviation).slice(0, 3);
+    ins.push({ level: 'warning', icon: '⚠️', title: `${lagging.length} 项进度落后于时间进度`,
       text: worst.map(h => `${h.t.name}（实际 ${h.t.progress}% vs 应达 ${Math.round(h.timeProgress)}%）`).join('；'),
-      advice: '建议：核查是估算偏乐观还是资源不足，必要时追加人力或缩减范围。' });
+      advice: '建议：拆成更小的子步骤，先完成最关键的一步，别想着一口气做完。' });
   }
   // 4. 临期
   if (dueSoon.length) {
-    ins.push({ level: 'warning', icon: '⏰', title: `${dueSoon.length} 项任务 7 天内到期`,
+    ins.push({ level: 'warning', icon: '⏰', title: `${dueSoon.length} 项 7 天内到期`,
       text: dueSoon.slice(0, 3).map(h => `${h.t.name}（剩 ${h.daysLeft} 天，进度 ${h.t.progress}%）`).join('；'),
-      advice: '建议：提前检查验收标准与依赖方，避免最后时刻才发现缺口。' });
+      advice: '建议：提前检查交付标准，避免最后一天才发现缺东西。' });
   }
   // 5. 高优先级风险
   const highRisk = agg.health.filter(h => !h.done && h.t.priority === '高' && (h.overdue || (h.deviation !== null && h.deviation < -10)));
   if (highRisk.length) {
-    ins.push({ level: 'critical', icon: '🔥', title: `${highRisk.length} 项高优先级任务存在交付风险`,
-      text: highRisk.slice(0, 3).map(h => `${h.t.name}（${h.t.team}·${h.t.owner}，${h.t.progress}%）`).join('；'),
-      advice: '建议：这类任务影响面最大，建议每日跟踪，必要时上报管理层协调。' });
+    ins.push({ level: 'critical', icon: '🔥', title: `${highRisk.length} 项高优先级事项存在交付风险`,
+      text: highRisk.slice(0, 3).map(h => `${h.t.name}（${h.t.progress}%）`).join('；'),
+      advice: '建议：这类事影响面最大，今天至少推进一步，别让它拖到明天。' });
   }
-  // 6. 团队负载
-  if (teams.length >= 2) {
-    const avg = teams.reduce((s, t) => s + t.active, 0) / teams.length;
-    const heavy = teams.filter(t => t.active > avg * 1.4 && t.active >= 2);
-    const weak = teams.filter(t => t.rate < 50);
-    if (heavy.length) {
-      ins.push({ level: 'info', icon: '⚖️', title: '团队负载不均衡',
-        text: heavy.map(t => `${t.team}：进行中 ${t.active} 项（均值 ${avg.toFixed(1)}）`).join('；'),
-        advice: '建议：将部分任务横向调配给负载较轻的团队，避免单点过载拖累整体节奏。' });
-    }
-    if (weak.length) {
-      ins.push({ level: 'info', icon: '📉', title: '部分团队整体进度偏低',
-        text: weak.map(t => `${t.team}：平均完成 ${t.rate}%`).join('；'),
-        advice: '建议：了解该团队是否存在共性障碍（如需求变更频繁、外部依赖多）。' });
-    }
-  }
-  // 7. 未开始
+  // 6. 未开始
   if (notStarted.length >= 3) {
-    ins.push({ level: 'info', icon: '📥', title: `${notStarted.length} 项任务尚未启动`,
-      text: notStarted.slice(0, 3).map(t => `${t.name}（${t.owner}）`).join('；'),
-      advice: '建议：确认排期是否合理，长期挂起未启动的任务应及时清理或重新排期。' });
+    ins.push({ level: 'info', icon: '📥', title: `${notStarted.length} 项尚未启动`,
+      text: notStarted.slice(0, 3).map(t => t.name).join('；'),
+      advice: '建议：长期挂起未启动的事项，要么排个具体时间，要么直接删掉——待办清单越长，越没人敢看。' });
   }
   // 8. 正面反馈
-  if (!overdue.length && !blocked.length && !lagging.length) {
-    ins.push({ level: 'good', icon: '✅', title: '整体进度健康，无逾期与阻塞',
-      text: `全部 ${total} 项任务中已完成 ${done.length} 项，平均进度 ${avgProgress}%。`,
-      advice: '建议：保持当前节奏，可考虑提前启动下阶段任务以留出缓冲。' });
+  if (!overdue.length && !blocked.length && !lagging.length && total > 0) {
+    ins.push({ level: 'good', icon: '✅', title: '节奏健康，无逾期与阻塞',
+      text: `全部 ${total} 项已挂起事项中完成 ${done.length} 项，平均进度 ${avgProgress}%。`,
+      advice: '建议：保持当前节奏，可考虑提前启动下阶段工作留出缓冲。' });
   }
   if (score >= 85 && ins.length < 3) {
     ins.push({ level: 'good', icon: '💚', title: '任务健康度良好',
@@ -1136,8 +1306,8 @@ function renderAiInsights(agg) {
 
   box.innerHTML = `
     <div class="ai-summary">
-      综合健康评分 <b style="color:${levelColor}">${score} / 100（${level}）</b>　·
-      共 ${agg.total} 项任务，平均进度 <b>${agg.avgProgress}%</b>　·
+      全局把控评分 <b style="color:${levelColor}">${score} / 100（${level}）</b>　·
+      共 ${agg.total} 项工作事项，平均进度 <b>${agg.avgProgress}%</b>　·
       已逾期 <b style="color:${agg.overdue.length ? '#ee5a6f' : 'inherit'}">${agg.overdue.length}</b> 项，
       阻塞 <b style="color:${agg.blocked.length ? '#ee5a6f' : 'inherit'}">${agg.blocked.length}</b> 项，
       进度滞后 <b style="color:${agg.lagging.length ? '#ff9f43' : 'inherit'}">${agg.lagging.length}</b> 项
@@ -1237,8 +1407,9 @@ function renderLlmResult(r) {
           <div class="ac-no">${i + 1}</div>
           <div class="ac-main">
             <div class="ac-head">
-              <b>${a.task}</b>
-              ${a.owner ? `<span class="ac-owner">${a.owner}</span>` : ''}
+              <b>${escapeHtml(a.task)}</b>
+              ${(TASKS.find(t => t.name === a.task) || {}).category
+                ? `<span class="ac-owner">${CAT_ICON[TASKS.find(t => t.name === a.task).category] || '📌'} ${TASKS.find(t => t.name === a.task).category}</span>` : ''}
               <span class="ac-by">${a.by ? '⏱ ' + a.by : ''}</span>
             </div>
             ${a.problem ? `<div class="ac-problem">${a.problem}</div>` : ''}
@@ -1337,11 +1508,15 @@ function onProviderChange() {
 // ---- 中文规则引擎（无需 Key 即可工作）----
 const SMART_RULES = {
   actions: [
+    { re: /(报销|贴票|开票|报销单)/, v: '报销' },
+    { re: /(办理|申请|申报|年审)/, v: '办理' },
+    { re: /(付款|转账|打款|付钱|结款)/, v: '付款' },
     { re: /(打电话|电话|通话|致电|call)/i, v: '致电' },
     { re: /(开会|会议|碰头|对齐|review)/i, v: '开会' },
-    { re: /(拜访|面谈|去见|去见|上门)/i, v: '拜访' },
+    { re: /(拜访|面谈|去见|上门)/i, v: '拜访' },
     { re: /(确认|核实|核对)/i, v: '确认' },
-    { re: /(提交|交付|上传|报)/i, v: '提交' },
+    { re: /(提交|交付|上传)/i, v: '提交' },
+    { re: /(协商|调解|处理)/, v: '协商' },
     { re: /(催|跟进|追)/i, v: '跟进' },
     { re: /(评审|审阅|看一遍)/i, v: '评审' },
     { re: /(整理|梳理|汇总)/i, v: '整理' },
@@ -1349,8 +1524,7 @@ const SMART_RULES = {
     { re: /(签约|签合同|签)/i, v: '签约' },
     { re: /(洽谈|谈|报价|议价)/i, v: '洽谈' },
     { re: /(下单|采购|买)/i, v: '采购' },
-    { re: /(收款|收款|回款|收钱)/i, v: '收款' },
-    { re: /(付款|转账|打款|付钱|结款)/i, v: '付款' },
+    { re: /(收款|回款|收钱)/i, v: '收款' },
     { re: /(设计|做|完成|搞定)/i, v: '推进' },
   ],
   amountKey: /(合同|方案|报价|发票|采购|订单|付款|费用|预算|工资|薪酬|项目|标的|金额|货款)/,
@@ -1397,13 +1571,32 @@ const SMART_SCENES = [
     ] },
 ];
 
+// 去掉句子里的时间/语气词，用于生成简洁标题
+// 注意：要先去掉「下周三/周五」这类带前缀的星期，再去掉「本周/上周」这类非星期用法
+function stripTimeWords(s) {
+  return String(s || '')
+    .replace(/(本|这|下|上|每|前|当)?周[一二三四五六日天末]/g, '')
+    .replace(/(本周内|本周|这周|下周|上周|每周|周内)/g, '')
+    .replace(/(今天|明天|后天|大后天|上午|下午|晚上|中午)/g, '')
+    .replace(/[0-9]{1,2}[点时][0-5]?[0-9]?分?/g, '')
+    .replace(/[，。！？、,.:：\s]+/g, '')
+    .trim();
+}
+
 function smartDetectContact(text) {
-  // 优先匹配 "X总/X经理/X哥/王老板" 等
-  const titled = text.match(/([张王李赵刘陈杨黄周吴徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾肖田董袁潘蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向常][总经理老板哥哥姐长])/);
-  if (titled) return titled[1];
-  // 中文联系人单位
-  const unit = text.match(/([张王李赵刘陈杨黄周吴徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾肖田董袁潘蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向常])/);
-  return unit ? unit[1] + '' : '';
+  const SURNAME = '张王李赵刘陈杨黄吴徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾肖田董袁潘蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向常';
+  const SURNAME_RE = '[' + SURNAME + '周]';
+  // 「本周 / 下周 / 周报 / 周末 / 周围」里的"周"不是姓，先屏蔽掉
+  const clean = String(text || '')
+    .replace(/(本|这|下|上|每|前|当)周/g, '$1　')
+    .replace(/(周末|周报|周围|周会|周边|周年)/g, m => '　'.repeat(m.length));
+  // ① 带称谓：X总 / X经理 / X老师 / X哥 …
+  let m = clean.match(new RegExp('(' + SURNAME_RE + ')(总|老板|经理|总监|主管|行长|老师|专员|同事|同学|工程师|律师|会计|哥|姐)'));
+  if (m) return m[1] + m[2];
+  // ② 有引导介词：给/跟/和/找/帮/向 + 姓
+  m = clean.match(new RegExp('(?:跟|和|给|向|找|与|请|让|帮|陪|约|同)( ' + SURNAME_RE + ')'.replace(' ', '')));
+  if (m) return m[1];
+  return '';
 }
 
 // 相对时间换算
@@ -1464,7 +1657,7 @@ function smartComposeRemark(d) {
 
 function smartParseByRules(text) {
   const draft = {
-    name: '', owner: '', team: '', priority: '中', status: '进行中',
+    name: '', category: '', priority: '中', status: '进行中',
     start: '', due: '', hours: 0, progress: 0, remark: '',
     tags: [], questions: [], contact: '', amountText: '',
     raw: text, timePhrase: '',
@@ -1477,7 +1670,7 @@ function smartParseByRules(text) {
   // 联系人
   draft.contact = smartDetectContact(text);
   // 对象/领域词（任务名后缀）
-  const obj = text.match(/(合同|方案|报价单?|发票|采购单?|订单|报告|项目书?|计划书?|PPT|预算|简历|名单|清单|工资|招聘|回访|材料|资料)/);
+  const obj = text.match(/(花名册|台账|档案|报表|名册|简历|计划|名单|清单|制度|流程|SOP|通知|表格|合同|方案|报价单?|发票|采购单?|订单|报告|项目书?|计划书?|PPT|预算|工资|薪酬|社保|公积金|个税|招聘|面试|OFFER|培训|回访|材料|资料|公积金|营业执照|执照|印章|工伤|仲裁|纠纷|投诉)/i);
   let objWord = obj ? obj[1] : '';
 
   // 场景识别：优先具体场景；通用兜底场景(fallback)只在"没有具体对象/领域词"时才启用，
@@ -1507,15 +1700,19 @@ function smartParseByRules(text) {
   const nameParts = [];
   if (action) nameParts.push(action);
   if (draft.contact) nameParts.push(draft.contact);
-  if (objWord) nameParts.push(objWord);
+  if (objWord && objWord !== action && objWord !== draft.contact) nameParts.push(objWord);   // 去重，避免「报销报销」
   if (!nameParts.length) {
-    const cleaned = text.replace(/(今天|明天|后天|大后天|周[一二三四五六日天]|上午|下午|晚上|中午|[0-9]{1,2}[点时][0-5]?[0-9]?分?)/g, '').replace(/[，。！？\s]+/g, '').trim();
-    nameParts.push(cleaned.slice(0, 20) || text.slice(0, 20));
+    nameParts.push(stripTimeWords(text).slice(0, 20) || text.slice(0, 20));
+  } else if (nameParts.length === 1 && action && nameParts[0] === action) {
+    // 只识别出动作时，补一段原句里的宾语，避免标题过短（如只有「报销」）
+    const tail = stripTimeWords(text.replace(action, ''));
+    if (tail.length >= 2 && tail !== action) nameParts.push(tail.slice(0, 14));
   }
   if (timePhrase && nameParts[0] !== timePhrase) nameParts.push('(' + timePhrase + ')');
   draft.name = nameParts.join('').slice(0, 40);
   draft.timePhrase = timePhrase;
   draft.remark = smartComposeRemark(draft);
+  draft.category = detectCategory(text);
 
   // tags
   const tagSet = new Set();
@@ -1710,10 +1907,8 @@ function smartCommit() {
   openTaskModal(null);
   // 此时弹窗已填了默认值，再覆盖为草稿解析值
   document.getElementById('t_name').value = d.name || '';
-  // 负责人：保留弹窗默认；若解析明确指定负责人则覆盖（联系人≠负责人，不把对接方当执行人）
-  if (d.owner) document.getElementById('t_owner').value = d.owner;
-  const teamSel = document.getElementById('t_team');
-  if (d.team && [...teamSel.options].some(o => o.value === d.team)) teamSel.value = d.team;
+  const catSel2 = document.getElementById('t_category');
+  if (catSel2) catSel2.value = d.category || detectCategory(d.name || '');
   document.getElementById('t_priority').value = d.priority || '中';
   document.getElementById('t_start').value = d.start || (d.due ? '' : todayStr());
   document.getElementById('t_due').value = d.due || '';
@@ -1746,18 +1941,15 @@ async function smartAnalyze() {
   if (!parsed) {
     smartState.hasKey = false;
     const d = smartParseByRules(text);
-    // 让默认负责人 = 若表格有当前默认 owner（用表格第一行负责人作参考，无则留空）
     smartState.draft = d;
     smartRender();
     return;
   }
   // LLM 结果 → 规则字段格式
   const rulesDraft = smartParseByRules(text);
-  const ownerFromLlm = parsed.owner && parsed.owner !== rulesDraft.contact ? parsed.owner : '';
   const d = {
     name: parsed.name || rulesDraft.name,
-    owner: ownerFromLlm,
-    team: rulesDraft.team,
+    category: detectCategory(text),
     priority: parsed.priority || rulesDraft.priority,
     status: '进行中',
     start: parsed.start || rulesDraft.start,
@@ -1833,16 +2025,18 @@ function flashTaskRows(status) {
 
 function renderTasks() {
   const agg = computeTaskAgg(TASKS);
+  const today = todayStr();
 
   document.getElementById('tasksKpis').innerHTML = kpiHtml([
-    { label: '任务总数', value: agg.total, delta: '', dir: 'up', icon: '📋' },
-    { label: '已完成', value: agg.done.length, delta: '', dir: 'up', icon: '✅', status: '已完成' },
+    { label: '今日要处理', value: todayTodoCount(), delta: '', dir: 'up', icon: '☀️' },
+    { label: '本周已完成', value: agg.wkDone, delta: '', dir: 'up', icon: '✅', status: '已完成' },
     { label: '进行中', value: TASKS.filter(t => t.status === '进行中').length, delta: '', dir: 'up', icon: '🔄', status: '进行中' },
     { label: '逾期 / 阻塞', value: agg.overdue.length + ' / ' + agg.blocked.length, delta: '', dir: 'down', icon: '🚨' },
-    { label: '平均进度', value: agg.avgProgress + '%', delta: '', dir: 'up', icon: '📈' },
+    { label: '7 天内到期', value: agg.dueSoon.length, delta: '', dir: 'down', icon: '⏰' },
   ]);
 
   renderAiInsights(agg);
+  renderNextActions(TASKS);
 
   // 状态分布
   const tkStatusChart = initChart('tkStatus');
@@ -1859,15 +2053,22 @@ function renderTasks() {
     if (['未开始', '进行中', '已完成', '阻塞'].includes(st)) gotoTaskStatus(st);
   });
 
-  // 团队完成率
-  initChart('tkTeam').setOption({
-    grid: { ...baseGrid, left: 70, right: 60 },
-    tooltip: { trigger: 'axis', valueFormatter: v => v + '%' },
-    xAxis: { type: 'value', max: 100, ...axisStyle, axisLabel: { formatter: '{value}%', color: SOFT } },
-    yAxis: { type: 'category', data: agg.teams.map(t => t.team).reverse(), ...axisStyle },
-    series: [{ type: 'bar', data: agg.teams.map(t => t.rate).reverse(),
-      itemStyle: { color: new echarts.graphic.LinearGradient(1, 0, 0, 0, [{ offset: 0, color: '#2ec4b6' }, { offset: 1, color: '#48cae4' }]), borderRadius: [0, 6, 6, 0] }, barWidth: '55%',
-      label: { show: true, position: 'right', formatter: '{c}%', color: SOFT, fontSize: 11, fontWeight: 600 } }],
+  // 各分类完成情况（堆叠：已完成 / 进行中 / 未开始 / 阻塞）
+  const STATUS_ORDER = ['已完成', '进行中', '未开始', '阻塞'];
+  const catNames = agg.cats.map(c => c.cat);
+  initChart('tkCatStack').setOption({
+    grid: { ...baseGrid, left: 90, bottom: 30, top: 34 },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    legend: { top: 0, textStyle: { color: SOFT }, itemGap: 12 },
+    xAxis: { type: 'value', ...axisStyle, minInterval: 1, axisLabel: { color: SOFT } },
+    yAxis: { type: 'category', data: catNames.slice().reverse(), ...axisStyle },
+    series: STATUS_ORDER.map(st => ({
+      name: st, type: 'bar', stack: 'total', barWidth: '55%',
+      itemStyle: { color: TK_STATUS_COLOR[st] },
+      emphasis: { focus: 'series' },
+      label: { show: true, color: '#fff', fontSize: 10, fontWeight: 600, formatter: p => p.value ? p.value : '' },
+      data: agg.cats.slice().reverse().map(c => aggCatsStatusCount(agg, c.cat, st)),
+    })),
   });
 
   // 优先级分布
@@ -1879,19 +2080,247 @@ function renderTasks() {
       label: { color: TEXT, formatter: '{b}\n{c} 项 ({d}%)', fontSize: 11 }, data: agg.priority }],
   });
 
-  // 工时投入
-  initChart('tkHours').setOption({
-    grid: { ...baseGrid, left: 70 },
+  // 各类工作投入工时
+  initChart('tkCatHours').setOption({
+    grid: { ...baseGrid, left: 90, bottom: 30 },
     tooltip: { trigger: 'axis', valueFormatter: v => v + ' 小时' },
-    xAxis: { type: 'category', data: agg.teams.map(t => t.team), ...axisStyle },
+    xAxis: { type: 'category', data: agg.cats.map(c => c.cat), ...axisStyle,
+      axisLabel: { color: SOFT, interval: 0, fontSize: 11 } },
     yAxis: { type: 'value', ...axisStyle },
-    series: [{ type: 'bar', data: agg.teams.map(t => t.hours),
-      itemStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: '#8b5cf6' }, { offset: 1, color: '#c4b5fd' }]), borderRadius: [6, 6, 0, 0] }, barWidth: '52%',
+    series: [{ type: 'bar', data: agg.cats.map(c => ({ value: c.hours, itemStyle: { color: c.color, borderRadius: [6, 6, 0, 0] } })),
+      barWidth: '52%',
       label: { show: true, position: 'top', formatter: '{c}h', color: SOFT, fontSize: 11, fontWeight: 600 } }],
   });
 
   renderGantt(TASKS);
   tkRenderTable();
+}
+
+// 某分类下某状态的事项数
+function aggCatsStatusCount(agg, cat, status) {
+  return agg.total ? TASKS.filter(t => (t.category || detectCategory(t.name)) === cat && t.status === status).length : 0;
+}
+
+// 今日待办口径：已逾期 / 今天或明天到期 / 阻塞中 / 今天有更新，且都未完成
+function todayTodoCount() {
+  const today = todayStr();
+  const tmr = new Date(); tmr.setDate(tmr.getDate() + 1);
+  const tmrStr = tmr.toISOString().slice(0, 10);
+  return TASKS.filter(t => {
+    if (t.status === '已完成') return false;
+    const h = taskHealth(t, today);
+    const upd = t.updatedAt ? String(t.updatedAt).slice(0, 10) : '';
+    return h.overdue || t.status === '阻塞' || upd === today
+      || (t.due && t.due >= today && t.due <= tmrStr);
+  }).length;
+}
+
+// ============================================================
+//  下一步建议面板（规则引擎，实时；AI 深度分析另在下方卡片）
+// ============================================================
+function renderNextActions(allTasks) {
+  const box = document.getElementById('nextActions');
+  if (!box) return;
+
+  const acts = buildNextActions(allTasks);
+  const todo = acts.filter(a => a.level !== 'good');
+  const ok = acts.filter(a => a.level === 'good');
+
+  if (!allTasks.length) {
+    box.innerHTML = '<div class="na-empty">还没有工作记录。在上方输入框一句话记一件事，或点「＋ 新增事项」，这里会立刻给出下一步建议。</div>';
+    return;
+  }
+  if (!acts.length) {
+    box.innerHTML = '<div class="na-empty">🎉 所有事项已完成，暂无待办。可以考虑记录下周要做的事了。</div>';
+    return;
+  }
+
+  const headTodo = todo.length
+    ? `<div class="na-count">未完成 <b>${todo.length}</b> 项，其中紧急 <b style="color:#ee5a6f">${todo.filter(a => a.level === 'danger').length + todo.filter(a => a.level === 'warn').length}</b> 项，建议按下面的顺序动手 👇</div>`
+    : '<div class="na-count">✅ 没有需要干预的事项，节奏很稳。下面是正常推进中的事：</div>';
+
+  const rowHtml = a => {
+    const c = CAT_COLOR[a.cat] || '#8896b3';
+    return `<div class="na-item ${a.level}">
+      <span class="na-ico">${a.icon}</span>
+      <div class="na-main">
+        <div class="na-title">${escapeHtml(a.title)}<span class="na-cat" style="background:${c}1a;color:${c}">${CAT_ICON[a.cat] || '📌'} ${a.cat}</span></div>
+        <div class="na-reason">${escapeHtml(a.reason)}</div>
+        <div class="na-do">👉 ${escapeHtml(a.action)}</div>
+        <div class="na-ops">
+          <button class="na-op done" onclick="quickDone('${a.taskId}')">✓ 标记完成</button>
+          <button class="na-op" onclick="postponeTask('${a.taskId}',1)">顺延 1 天</button>
+          <button class="na-op" onclick="postponeTask('${a.taskId}',3)">顺延 3 天</button>
+          <button class="na-op" onclick="openTaskModal('${a.taskId}')">编辑</button>
+        </div>
+      </div>
+    </div>`;
+  };
+
+  const pileups = buildCategoryPileups(allTasks).slice(0, 3);
+  const pileHtml = pileups.length ? pileups.map(p =>
+    `<div class="na-pile">${p.icon} <b>「${p.cat}」已堆 ${p.n} 项未完成</b>：${p.names.slice(0, 4).map(escapeHtml).join('、')}${p.n > 4 ? ' 等' : ''} —— 建议集中一个时间段批量处理，比穿插做省切换成本。</div>`
+  ).join('') : '';
+
+  const mainRows = (todo.length ? todo : ok).slice(0, 8).map(rowHtml).join('');
+  const restRows = (todo.length ? todo : ok).slice(8);
+  const moreHtml = restRows.length
+    ? `<div class="na-count" style="margin-top:4px">另有 ${restRows.length} 项优先级较低的事项，<a href="javascript:void(0)" onclick="switchTaskView('open')">查看全部未完成 →</a></div>`
+    : '';
+  const goodHtml = todo.length && ok.length
+    ? `<div class="na-count" style="margin-top:10px">此外 ${ok.length} 项在正常推进中，无需今天干预。</div>`
+    : '';
+
+  box.innerHTML = headTodo + mainRows + moreHtml + goodHtml + pileHtml;
+}
+
+// 「标记完成」快捷按钮
+async function quickDone(id) {
+  const t = TASKS.find(x => x.id === id);
+  if (!t) return;
+  try {
+    await apiJson('/tasks/' + id, { status: '已完成', progress: 100, completedAt: new Date().toISOString().slice(0, 10) }, 'PUT');
+    await refreshTasks();
+  } catch (e) { alert('操作失败：' + e.message); }
+}
+
+// 顺延：把截止日期往后推 N 天，并写一条日志（逾期不会消失，会一直出现在今日视图）
+async function postponeTask(id, days) {
+  const t = TASKS.find(x => x.id === id);
+  if (!t) return;
+  const base = t.due && d2n(t.due) ? new Date(t.due) : new Date();
+  base.setDate(base.getDate() + days);
+  const nd = base.toISOString().slice(0, 10);
+  const log = { at: new Date().toISOString(), text: `自动顺延：${t.due || '未设截止'} → ${nd}（延后 ${days} 天）` };
+  try {
+    await apiJson('/tasks/' + id, { due: nd, logs: [...(t.logs || []), log] }, 'PUT');
+    await refreshTasks();
+  } catch (e) { alert('顺延失败：' + e.message); }
+}
+
+// 逾期一键顺延：全部顺延到本周日（一个能真的做完的日期）
+async function carryAllOverdue() {
+  const today = todayStr();
+  const list = TASKS.filter(t => t.status !== '已完成' && taskHealth(t, today).overdue);
+  if (!list.length) { alert('当前没有逾期未完成的事项 🎉'); return; }
+  const { end } = weekRangeJs();
+  if (!confirm(`有 ${list.length} 项已逾期未完成：\n\n` +
+    list.slice(0, 8).map(t => `· ${t.name}（原截止 ${t.due || '—'}）`).join('\n') +
+    (list.length > 8 ? `\n· …等共 ${list.length} 项` : '') +
+    `\n\n确认把它们统一顺延到本周日（${end}）？`)) return;
+  for (const t of list) {
+    const log = { at: new Date().toISOString(), text: `批量顺延：${t.due || '未设截止'} → ${end}` };
+    try { await apiJson('/tasks/' + t.id, { due: end, logs: [...(t.logs || []), log] }, 'PUT'); }
+    catch (e) { console.warn('顺延失败', t.name, e.message); }
+  }
+  await refreshTasks();
+}
+
+// 视图切换（供下一步建议里的链接调用）
+function switchTaskView(v) {
+  TK_VIEW = v;
+  document.querySelectorAll('#tkViewToggle .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.view === v));
+  tkState.page = 1;
+  tkRenderTable();
+  const card = document.getElementById('tkListCard');
+  if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// ============================================================
+//  一键生成周报
+// ============================================================
+function buildWeeklyHtml() {
+  const r = buildWeeklyReport(TASKS);
+  const doneSec = r.done.length
+    ? `<ul>${r.done.map(t => `<li>${escapeHtml(t.name)}${t.due ? `（截止 ${t.due}）` : ''}</li>`).join('')}</ul>`
+    : '<div>本周暂无标记完成的事项。</div>';
+
+  const doingSec = r.doing.length
+    ? `<ul>${r.doing.map(t => {
+        const h = taskHealth(t, r.today);
+        const tag = h.overdue ? ` <span style="color:#ee5a6f">[已逾期 ${Math.abs(h.daysLeft)} 天]</span>`
+          : (h.daysLeft !== null && h.daysLeft <= 3 ? ` <span style="color:#ff9f43">[剩 ${h.daysLeft} 天]</span>` : '');
+        return `<li>${escapeHtml(t.name)}　进度 ${t.progress || 0}%${tag}</li>`;
+      }).join('')}</ul>`
+    : '<div>暂无进行中事项。</div>';
+
+  const planSec = r.soon.length
+    ? `<ul>${r.soon.map(t => `<li>${escapeHtml(t.name)}（${t.due} 到期）</li>`).join('')}</ul>`
+    : '<div>未来 7 天暂无到期事项。</div>';
+
+  const riskSec = (r.overdue.length || r.blocked.length)
+    ? `<ul>${r.overdue.map(t => `<li>${escapeHtml(t.name)}　已逾期 ${Math.abs(taskHealth(t, r.today).daysLeft)} 天</li>`).join('')}
+        ${r.blocked.map(t => `<li>${escapeHtml(t.name)}　处于阻塞${t.remark ? '：' + escapeHtml(t.remark) : ''}</li>`).join('')}</ul>`
+    : '<div>暂无需要协调支持的事项。</div>';
+
+  const catArr = Object.entries(r.catMap).sort((a, b) => b[1] - a[1]);
+  const catSec = catArr.length
+    ? catArr.map(([c, n]) => `${CAT_ICON[c] || '📌'} ${c} ${n} 项`).join('　·　')
+    : '本周暂无分类数据';
+
+  return `<h4>一、本周完成（${r.done.length} 项）</h4>${doneSec}
+<h4>二、进行中（${r.doing.length} 项）</h4>${doingSec}
+<h4>三、下周计划（${r.soon.length} 项）</h4>${planSec}
+<h4>四、需支持 / 风险（${r.overdue.length + r.blocked.length} 项）</h4>${riskSec}
+<h4>五、投入分布</h4><div>${catSec}${r.hours ? `　·　合计计划工时 ${r.hours} 小时` : ''}</div>`;
+}
+
+function openWeeklyReport() {
+  if (!TASKS.length) { alert('还没有工作记录，无法生成周报'); return; }
+  const r = buildWeeklyReport(TASKS);
+  document.getElementById('weeklyText').innerHTML = buildWeeklyHtml();
+  const tip = document.getElementById('weeklyTip');
+  tip.textContent = `统计区间 ${r.start} ~ ${r.end}`;
+  tip.className = 'ai-test-result';
+  document.getElementById('weeklyModal').classList.add('open');
+}
+function closeWeeklyReport() { document.getElementById('weeklyModal').classList.remove('open'); }
+
+function copyWeekly() {
+  const el = document.getElementById('weeklyText');
+  const text = el.innerText.replace(/\n{3,}/g, '\n\n').trim();
+  const done = () => {
+    const tip = document.getElementById('weeklyTip');
+    tip.textContent = '已复制到剪贴板 ✓';
+    tip.className = 'ai-test-result ok';
+    setTimeout(() => { tip.textContent = ''; }, 2500);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+  } else fallbackCopy(text, done);
+}
+function fallbackCopy(text, cb) {
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); cb(); } catch (e) { alert('复制失败，请手动选中文本复制'); }
+  ta.remove();
+}
+
+async function polishWeeklyWithAi() {
+  const btn = document.getElementById('weeklyAi');
+  const tip = document.getElementById('weeklyTip');
+  const raw = document.getElementById('weeklyText').innerText.trim();
+  if (!raw) { alert('周报内容为空'); return; }
+  btn.disabled = true; const old = btn.textContent; btn.textContent = '润色中…';
+  tip.textContent = ''; tip.className = 'ai-test-result';
+  try {
+    const r = await aiFetch('/ai/polish', { text: raw }, 'POST');
+    if (!r.ok) throw new Error(r.error || '润色失败');
+    document.getElementById('weeklyText').innerText = r.text;
+    tip.textContent = `已由 ${r.model || '大模型'} 润色，可直接修改`;
+    tip.className = 'ai-test-result ok';
+  } catch (e) {
+    if (e.payload && e.payload.needConfig) {
+      const go = confirm('尚未配置大模型 API Key，无法润色。\n\n现在去「AI 设置」填写吗？');
+      if (go) openAiSettings();
+    } else {
+      tip.textContent = '润色失败：' + (e.message || '');
+      tip.className = 'ai-test-result err';
+    }
+  } finally {
+    btn.disabled = false; btn.textContent = old;
+  }
 }
 
 // ---------- 甘特图（按真实起止日期）----------
@@ -1932,7 +2361,8 @@ function renderGantt(tasks) {
       const t = p.data.t;
       const h = taskHealth(t, todayStr());
       const dl = h.daysLeft === null ? '—' : (h.daysLeft < 0 ? `已逾期 ${Math.abs(h.daysLeft)} 天` : `剩 ${h.daysLeft} 天`);
-      return `<b>${t.name}</b><br/>负责人：${t.owner}（${t.team}）<br/>状态：${t.status} · ${t.priority}优先级<br/>进度：${t.progress}%<br/>周期：${t.start} ~ ${t.due}<br/>${dl}`;
+      const cat = t.category || detectCategory(t.name);
+      return `<b>${escapeHtml(t.name)}</b><br/>分类：${CAT_ICON[cat] || '📌'} ${cat}<br/>状态：${t.status} · ${t.priority}优先级<br/>进度：${t.progress}%<br/>周期：${t.start} ~ ${t.due}<br/>${dl}`;
     }},
     xAxis: { type: 'value', min: 0, max: totalDays, ...axisStyle, axisLabel: { show: false }, splitLine: { lineStyle: { color: '#eef2f9' } } },
     yAxis: { type: 'category', data: names.slice().reverse(), ...axisStyle, axisTick: { show: false } },
@@ -1965,16 +2395,51 @@ function renderGantt(tasks) {
 }
 
 // ---------- 任务表格 ----------
+// 快捷视图：today=今日(含逾期自动置顶) / week=本周 / open=未完成 / done=已完成 / all=全部
+let TK_VIEW = 'today';
+
 function tkApplyFilters() {
   const q = (document.getElementById('tkSearch').value || '').trim().toLowerCase();
-  const team = document.getElementById('tkTeamFilter').value;
   const status = document.getElementById('tkStatusFilter').value;
   const prio = document.getElementById('tkPriorityFilter').value;
+  const cat = document.getElementById('tkCatFilter') ? document.getElementById('tkCatFilter').value : '';
+  const today = todayStr();
+
+  // 本周范围（周一~周日）
+  const now = new Date();
+  const dow = now.getDay() === 0 ? 7 : now.getDay();
+  const mon = new Date(now); mon.setDate(now.getDate() - (dow - 1));
+  const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+  const fmt = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const wkStart = fmt(mon), wkEnd = fmt(sun);
+
   tkState.filtered = TASKS.filter(t => {
-    if (q && !(`${t.name} ${t.owner}`.toLowerCase().includes(q))) return false;
-    if (team && t.team !== team) return false;
+    const h = taskHealth(t, today);
+    // 视图范围
+    if (TK_VIEW === 'today') {
+      // 今日要处理：逾期未完成 / 今天或明天到期 / 阻塞中 / 今天有更新
+      if (t.status === '已完成') return false;
+      const upd = t.updatedAt ? String(t.updatedAt).slice(0, 10) : '';
+      if (h.overdue || t.status === '阻塞' || upd === today) return true;
+      if (t.due && t.due >= today && t.due <= fmt(new Date(now.getTime() + 86400000))) return true;
+      return false;
+    } else if (TK_VIEW === 'week') {
+      // 本周：本周到期 + 本周有更新 + 仍未清掉的逾期 + 本周刚做完的
+      const upd = t.updatedAt ? String(t.updatedAt).slice(0, 10) : '';
+      const fin = t.completedAt ? String(t.completedAt).slice(0, 10) : '';
+      const touched = (upd && upd >= wkStart && upd <= wkEnd) || (fin && fin >= wkStart && fin <= wkEnd);
+      const dueInWeek = t.due && t.due >= wkStart && t.due <= wkEnd;
+      const isOpen = t.status !== '已完成';
+      if (!(dueInWeek || touched || (isOpen && (h.overdue || t.status === '阻塞')))) return false;
+    } else if (TK_VIEW === 'open') {
+      if (t.status === '已完成') return false;
+    } else if (TK_VIEW === 'done') {
+      if (t.status !== '已完成') return false;
+    }
+    if (q && !(`${t.name} ${t.remark || ''}`.toLowerCase().includes(q))) return false;
     if (status && t.status !== status) return false;
     if (prio && t.priority !== prio) return false;
+    if (cat && (t.category || detectCategory(t.name)) !== cat) return false;
     return true;
   });
 }
@@ -2001,14 +2466,13 @@ function tkRenderTable() {
   const body = '<tbody>' + (rows.length ? rows.map(t => {
     const h = taskHealth(t, today);
     const dl = h.daysLeft === null ? '—' : (h.done ? '已交付' : (h.daysLeft < 0 ? `<span style="color:#ee5a6f">逾期${Math.abs(h.daysLeft)}天</span>` : `${h.daysLeft}天`));
+    const cat = t.category || detectCategory(t.name);
     return `<tr>
       <td>${t.name}</td>
-      <td>${t.owner}</td>
-      <td>${t.team}</td>
+      <td><span class="tag" style="background:${CAT_COLOR[cat] || '#8896b3'}1a;color:${CAT_COLOR[cat] || '#8896b3'}">${CAT_ICON[cat] || '📌'} ${cat}</span></td>
       <td><span class="tag" style="background:${TK_PRIO_COLOR[t.priority] || '#888'}1a;color:${TK_PRIO_COLOR[t.priority] || '#888'}">${t.priority}</span></td>
       <td><span class="tag tag-${t.status}" data-status="${t.status}">${t.status}</span></td>
       <td><div class="mini-bar"><i style="width:${t.progress || 0}%;background:${TK_STATUS_COLOR[t.status] || '#4361ee'}"></i><span>${t.progress || 0}%</span></div></td>
-      <td>${t.start || '—'}</td>
       <td>${t.due || '—'}<br><small style="color:${h.overdue ? '#ee5a6f' : SOFT}">${dl}</small></td>
       <td>${t.hours || 0}h</td>
       <td class="remark-cell" title="点击编辑备注" data-task-id="${t.id}" data-remark="${escapeHtml(t.remark || '')}">
@@ -2017,11 +2481,12 @@ function tkRenderTable() {
           : `<span class="remark-empty">＋ 添加备注</span>`}
       </td>
       <td class="row-actions">
+        <button class="link-btn" onclick="postponeTask('${t.id}',1)">顺延</button>
         <button class="link-btn" onclick="openTaskModal('${t.id}')">编辑</button>
         <button class="link-btn danger" onclick="deleteTask('${t.id}')">删除</button>
       </td>
     </tr>`;
-  }).join('') : '<tr><td colspan="11" style="text-align:center;color:#8a94a6;padding:24px">暂无任务，点击「＋ 新增任务」开始录入</td></tr>') + '</tbody>';
+  }).join('') : '<tr><td colspan="9" style="text-align:center;color:#8a94a6;padding:24px">暂无工作事项，在上方输入框一句话记录，或点「＋ 新增事项」</td></tr>') + '</tbody>';
 
   const tbl = document.getElementById('tkTable');
   tbl.innerHTML = head + body;
@@ -2113,9 +2578,10 @@ async function loadTasks() {
   } catch (e) {
     console.warn('[HR] 任务接口不可用，使用内置数据：', e.message);
   }
-  // 回退：把内置甘特数据转成任务结构
+  // 回退：把内置甘特数据转成事项结构
   return HR.gantt.map((g, i) => ({
-    id: 'T' + (1000 + i), name: g.name, owner: g.owner, team: g.owner || '未指定',
+    id: 'T' + (1000 + i), name: g.name,
+    category: detectCategory(g.name),
     priority: i % 3 === 0 ? '高' : (i % 3 === 1 ? '中' : '低'),
     status: g.status === 'done' ? '已完成' : (g.status === 'doing' ? '进行中' : '未开始'),
     progress: g.progress, start: '2025-01-01', due: '2025-06-30', hours: 80, remark: '',
@@ -2124,11 +2590,11 @@ async function loadTasks() {
 
 function openTaskModal(id) {
   const t = id ? TASKS.find(x => x.id === id) : null;
-  document.getElementById('taskModalTitle').textContent = t ? '编辑任务' : '新增任务';
+  document.getElementById('taskModalTitle').textContent = t ? '编辑工作事项' : '新增工作事项';
   document.getElementById('t_id').value = t ? t.id : '';
   document.getElementById('t_name').value = t ? t.name : '';
-  document.getElementById('t_owner').value = t ? t.owner : '';
-  document.getElementById('t_team').value = t ? t.team : (document.getElementById('tkTeamFilter').value || '');
+  const catSel = document.getElementById('t_category');
+  if (catSel) { catSel.dataset.manual = t ? '1' : '0'; catSel.value = t ? (t.category || detectCategory(t.name)) : detectCategory(''); }
   document.getElementById('t_priority').value = t ? t.priority : '中';
   document.getElementById('t_status').value = t ? t.status : '进行中';
   document.getElementById('t_start').value = t ? (t.start || '') : todayStr();
@@ -2143,13 +2609,16 @@ function openTaskModal(id) {
 function closeTaskModal() { document.getElementById('taskModal').classList.remove('open'); }
 
 function collectTaskForm() {
+  const name = document.getElementById('t_name').value.trim();
+  const rawCat = document.getElementById('t_category').value;
+  const status = document.getElementById('t_status').value;
+  let progress = Number(document.getElementById('t_progress').value) || 0;
   return {
-    name: document.getElementById('t_name').value.trim(),
-    owner: document.getElementById('t_owner').value.trim(),
-    team: document.getElementById('t_team').value,
+    name,
+    category: rawCat || detectCategory(name),
     priority: document.getElementById('t_priority').value,
-    status: document.getElementById('t_status').value,
-    progress: Number(document.getElementById('t_progress').value) || 0,
+    status,
+    progress,
     start: document.getElementById('t_start').value,
     due: document.getElementById('t_due').value,
     hours: Number(document.getElementById('t_hours').value) || 0,
@@ -2160,9 +2629,9 @@ function collectTaskForm() {
 async function submitTaskForm(e) {
   e.preventDefault();
   const payload = collectTaskForm();
-  if (!payload.name || !payload.owner) { alert('请填写任务名称与负责人'); return; }
+  if (!payload.name) { alert('请填写工作事项'); return; }
   // 状态与进度一致性
-  if (payload.status === '已完成') payload.progress = 100;
+  if (payload.status === '已完成') { payload.progress = 100; payload.completedAt = todayStr(); }
   if (payload.status === '未开始') payload.progress = 0;
 
   const id = document.getElementById('t_id').value;
@@ -2179,19 +2648,23 @@ async function submitTaskForm(e) {
 
 async function deleteTask(id) {
   const t = TASKS.find(x => x.id === id);
-  if (!t || !confirm(`确认删除任务「${t.name}」？`)) return;
+  if (!t || !confirm(`确认删除事项「${t.name}」？`)) return;
   try { await apiJson('/tasks/' + id, null, 'DELETE'); }
   catch (e) { alert('删除失败：' + e.message); return; }
   await refreshTasks();
 }
 
+// 同步筛选下拉：分类选项动态生成（替代原"团队"维度）
 function syncTeamOptions() {
-  const teams = [...new Set(TASKS.map(t => t.team).filter(Boolean))].sort();
-  const sel = document.getElementById('tkTeamFilter');
-  const keep = sel.value;
-  sel.innerHTML = '<option value="">全部团队</option>' + teams.map(t => `<option value="${t}">${t}</option>`).join('');
-  sel.value = teams.includes(keep) ? keep : '';
-  document.getElementById('t_team').innerHTML = teams.map(t => `<option value="${t}">${t}</option>`).join('');
+  const cats = [...new Set(TASKS.map(t => (t.category || detectCategory(t.name))).filter(Boolean))].sort();
+  const sel = document.getElementById('tkCatFilter');
+  if (sel) {
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">全部分类</option>' + cats.map(c => `<option value="${c}">${CAT_ICON[c] || '📌'} ${c}</option>`).join('');
+    sel.value = cats.includes(keep) ? keep : '';
+  }
+  const tcat = document.getElementById('t_category');
+  if (tcat) tcat.innerHTML = WORK_CATEGORIES.map(c => `<option value="${c.name}">${c.icon} ${c.name}</option>`).join('');
 }
 
 // 重新加载任务并刷新看板（含 AI 分析）
@@ -2206,8 +2679,8 @@ async function refreshTasks() {
 function exportTasksExcel() {
   tkApplyFilters();
   const rows = tkState.filtered.map(t => ({
-    '任务名称': t.name, '负责人': t.owner, '团队': t.team, '优先级': t.priority,
-    '状态': t.status, '进度(%)': t.progress || 0, '开始日期': t.start || '', '截止日期': t.due || '',
+    '工作事项': t.name, '分类': t.category || detectCategory(t.name), '优先级': t.priority,
+    '状态': t.status, '进度(%)': t.progress || 0, '截止日期': t.due || '',
     '计划工时': t.hours || 0, '备注': t.remark || '',
   }));
   if (!rows.length) { alert('当前没有可导出的任务'); return; }
@@ -2299,7 +2772,7 @@ function buildPrintTableHtml(tasks) {
     return ia - ib || String(a.due || '9999-99').localeCompare(String(b.due || '9999-99'));
   });
   const head = '<tr style="background:#f0f3fa;">' +
-    '<th style="width:210px;text-align:left">任务名称</th><th>负责人</th><th>团队</th><th>优先级</th>' +
+    '<th style="width:210px;text-align:left">工作事项</th><th style="width:90px">分类</th><th>优先级</th>' +
     '<th>状态</th><th>进度</th><th>开始</th><th>截止</th><th style="width:110px">剩余</th><th style="width:240px">备注</th></tr>';
   const rows = sorted.map(t => {
     const h = taskHealth(t, today);
@@ -2311,9 +2784,10 @@ function buildPrintTableHtml(tasks) {
     } else if (h.done) remain = '已交付';
     const sc = PRINT_COLORS[t.status] || '#4361ee';
     const bg = h.overdue ? '#fff4f4' : (h.daysLeft !== null && !h.done && h.daysLeft >= 0 && h.daysLeft <= 7 ? '#fffaf0' : '#ffffff');
+    const cat = t.category || detectCategory(t.name);
     return '<tr style="background:' + bg + '">' +
       '<td style="border-left:6px solid ' + sc + ';font-weight:600;">' + escapeHtml(t.name) + '</td>' +
-      '<td>' + escapeHtml(t.owner || '') + '</td><td>' + escapeHtml(t.team || '') + '</td>' +
+      '<td>' + escapeHtml(cat) + '</td>' +
       '<td><b style="color:' + (PRINT_PRIO[t.priority] || '#8a94a6') + '">' + escapeHtml(t.priority || '') + '</b></td>' +
       '<td><span style="display:inline-block;background:' + sc + ';color:#fff;border-radius:10px;padding:1px 10px;font-size:11px;">' + escapeHtml(t.status || '') + '</span></td>' +
       '<td>' + (t.progress || 0) + '%</td>' +
@@ -2337,8 +2811,8 @@ function addHiddenBox(html, w) {
 // 生成标题+图例+甘特 段 HTML
 function buildGanttSectionHtml(list, hasGantt, ganttH) {
   return `<div style="padding:16px 22px 6px;background:#fff;font-family:'PingFang SC','Microsoft YaHei',sans-serif;">
-    <div style="font-size:21px;font-weight:700;color:#1f2a44;">📋 项目任务进度报表</div>
-    <div style="font-size:12px;color:#6b7892;margin:3px 0 8px;">共 ${list.length} 项任务　·　生成时间：${todayStr()}</div>
+    <div style="font-size:21px;font-weight:700;color:#1f2a44;">📋 个人工作周报（甘特视图）</div>
+    <div style="font-size:12px;color:#6b7892;margin:3px 0 8px;">共 ${list.length} 项工作事项　·　生成时间：${todayStr()}</div>
     ${printLegendHtml()}
     ${hasGantt ? `<div id="tkPrintGantt" style="width:${TK_PRINT_W - 44}px;height:${ganttH}px;"></div>` : '<div style="padding:10px 0;color:#9aa4b2;">（暂无可绘制的甘特任务，需填写开始/截止日期）</div>'}
   </div>`;
@@ -2346,7 +2820,7 @@ function buildGanttSectionHtml(list, hasGantt, ganttH) {
 
 function buildTableSectionHtml(list) {
   return `<div style="padding:4px 22px 18px;background:#fff;font-family:'PingFang SC','Microsoft YaHei',sans-serif;">
-    <div style="font-size:14px;font-weight:700;color:#1f2a44;padding:2px 0 6px;">任务明细（按状态分组 · 节点着色）</div>
+    <div style="font-size:14px;font-weight:700;color:#1f2a44;padding:2px 0 6px;">工作事项明细（按状态分组 · 节点着色）</div>
     ${buildPrintTableHtml(list)}
   </div>`;
 }
@@ -2363,7 +2837,7 @@ function composePrintPdf(canvases) {
   // 第一页页眉
   let cursorY = headerBand;
   doc.setFontSize(9); doc.setTextColor(110, 120, 146); doc.setFont(undefined, 'normal');
-  doc.text('任务进度报表 · ' + todayStr(), m, 14);
+  doc.text('工作周报 · ' + todayStr(), m, 14);
 
   canvases.forEach(img => {
     const ratio = img.height / img.width;
@@ -2393,7 +2867,7 @@ function composePrintPdf(canvases) {
       }
     }
   });
-  doc.save(`任务进度报表_${todayStr()}.pdf`);
+  doc.save(`工作周报_${todayStr()}.pdf`);
 }
 
 async function exportTasksPdf() {
@@ -2442,11 +2916,31 @@ async function ensureTasksLoaded() {
   await loadAiConfig();
   initSmartEntry();
   ['tkSearch'].forEach(id => document.getElementById(id).addEventListener('input', () => { tkState.page = 1; tkRenderTable(); }));
+  ['tkCatFilter', 'tkStatusFilter', 'tkPriorityFilter'].forEach(id => document.getElementById(id).addEventListener('change', () => { tkState.page = 1; tkRenderTable(); }));
+  // 快捷视图切换（今日 / 本周 / 未完成 / 已完成 / 全部）
+  document.querySelectorAll('#tkViewToggle .seg-btn').forEach(b => {
+    b.addEventListener('click', () => switchTaskView(b.dataset.view));
+  });
+  // 事项名输入时自动判定分类（用户手动改过分类后不再自动覆盖）
+  const nameInp = document.getElementById('t_name');
+  nameInp.addEventListener('input', () => {
+    const sel = document.getElementById('t_category');
+    if (sel && sel.dataset.manual !== '1') sel.value = detectCategory(nameInp.value);
+  });
+  document.getElementById('t_category').addEventListener('change', e => { e.target.dataset.manual = '1'; });
+  document.getElementById('btnCarryAll').onclick = carryAllOverdue;
+  document.getElementById('btnWeekly').onclick = openWeeklyReport;
+  document.getElementById('weeklyModalClose').onclick = closeWeeklyReport;
+  document.getElementById('weeklyCancel').onclick = closeWeeklyReport;
+  document.getElementById('weeklyCopy').onclick = copyWeekly;
+  document.getElementById('weeklyAi').onclick = polishWeeklyWithAi;
+  document.getElementById('weeklyModal').addEventListener('click', e => {
+    if (e.target.id === 'weeklyModal') closeWeeklyReport();
+  });
   document.getElementById('tasksKpis').addEventListener('click', e => {
     const chip = e.target.closest('.kpi-clickable');
     if (chip) { const st = chip.dataset.status; if (st) gotoTaskStatus(st); }
   });
-  ['tkTeamFilter', 'tkStatusFilter', 'tkPriorityFilter'].forEach(id => document.getElementById(id).addEventListener('change', () => { tkState.page = 1; tkRenderTable(); }));
   document.getElementById('btnTaskAdd').onclick = () => openTaskModal(null);
   document.getElementById('btnTaskExcel').onclick = exportTasksExcel;
   document.getElementById('btnTaskPdf').onclick = exportTasksPdf;
@@ -3275,7 +3769,7 @@ async function switchView(view) {
     personnel: ['人员看板', '员工结构、流动与分布分析'],
     salary: ['薪酬驾驶舱', '成本构成、部门对比、实发与税负分析'],
     performance: ['绩效驾驶舱', '绩效等级分布、部门对比、趋势与指标明细'],
-    tasks: ['任务进度看板', '重点工作进度与交付追踪'],
+    tasks: ['工作记录看板', '实时记录工作事项 · 下一步建议 · 一键周报'],
     employees: ['员工明细', '员工搜索、筛选、排序与导出'],
   };
   document.getElementById('viewTitle').textContent = titles[view][0];
